@@ -1,6 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 from PIL import Image
+from streamlit_image_select import image_select
 import os
 import shutil
 import json
@@ -17,39 +18,80 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- カスタムCSS（ギャラリーを見やすく） ---
+st.markdown("""
+<style>
+    .stButton>button {
+        width: 100%;
+        border-radius: 20px;
+        font-weight: bold;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- タイトル ---
 st.title("📸 AI Photo Story Curator")
-st.markdown("あなたの写真フォルダから、AIが「最高の4枚」をセレクトし、ストーリーを紡ぎます。")
+st.caption("アップロードした写真群から、AIが「最高の4枚」を選び出し、物語を紡ぎます。")
 
 # --- サイドバー：設定 ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    api_key = st.text_input("Gemini API Key", type="password", help="Google AI Studioで取得したキーを入力してください")
-    st.markdown("[🔑 APIキーの取得はこちら](https://aistudio.google.com/app/apikey)")
+    api_key = st.text_input("Gemini API Key", type="password", help="Google AI Studioで取得したキー")
+    st.markdown("[🔑 APIキー取得](https://aistudio.google.com/app/apikey)")
     st.divider()
-    st.info("※キーは保存されず、この場でのみ使用されます。")
+    
+    # ファイルアップローダーをサイドバーではなくメインに置くことも可能ですが、
+    # 連続作成しやすくするため、アップロードは「常駐」させます。
+    st.info("💡 写真を一度アップロードすれば、核となる写真を変えて何度でも生成できます。")
 
-# --- メイン：アップロード ---
+# --- メインエリア：アップロード ---
 uploaded_files = st.file_uploader(
-    "1. 写真をアップロード (20枚以上推奨)", 
+    "1. 写真をまとめてアップロード (20枚〜100枚推奨)", 
     accept_multiple_files=True, 
     type=['jpg', 'jpeg', 'png', 'heic', 'webp']
 )
 
+# --- メイン処理 ---
 if uploaded_files:
-    st.success(f"{len(uploaded_files)} 枚の写真を読み込みました！")
-    file_names = [f.name for f in uploaded_files]
-    
-    st.subheader("2. 「核」となる写真を選ぶ")
-    target_name = st.selectbox("この写真を軸にします", options=file_names)
-    
-    # プレビュー
-    selected_file = next((f for f in uploaded_files if f.name == target_name), None)
-    if selected_file:
-        st.image(selected_file, width=300)
+    # --- 2. ギャラリーで核を選ぶ ---
+    st.markdown("### 2. 「核」となる写真をクリックで選択")
+    st.caption("この写真を中心にストーリーが構成されます。選び直せば何度でも作れます。")
 
-    # --- 実行ボタン ---
-    if st.button("🚀 3つのパターンで作る", type="primary"):
+    # プレビュー用画像の準備（軽量化）
+    preview_imgs = []
+    file_indices = []
+    
+    # 全部の画像を表示すると重いので、最初の30枚または全てを表示
+    # ※多すぎる場合はユーザー体験を損なうため、適宜調整
+    display_limit = 100 
+    
+    for i, f in enumerate(uploaded_files[:display_limit]):
+        f.seek(0) # ファイルポインタを先頭に
+        img = Image.open(f)
+        img.thumbnail((150, 150)) # サムネイルサイズ
+        preview_imgs.append(img)
+        file_indices.append(i)
+
+    # ★ ここが新機能：画像をクリックして選べるギャラリー ★
+    selected_index = image_select(
+        label="",
+        images=preview_imgs,
+        captions=[f.name for f in uploaded_files[:display_limit]],
+        index=0,
+        return_value="index",
+        use_container_width=False
+    )
+    
+    # 選ばれたファイルを取得
+    target_file = uploaded_files[selected_index]
+    target_name = target_file.name
+
+    st.success(f"✅ 選択中: **{target_name}**")
+
+    # --- 3. 生成ボタン ---
+    st.markdown("### 3. ストーリー生成")
+    
+    if st.button("🚀 この写真で組み写真を作る", type="primary"):
         if not api_key:
             st.error("⚠️ 左のサイドバーでAPIキーを入力してください")
             st.stop()
@@ -60,36 +102,30 @@ if uploaded_files:
         progress_bar = st.progress(0)
         
         try:
-            # --- 1. モデル診断（ここを追加！） ---
-            status_text.text("🔑 最適なAIモデルを探しています...")
+            # --- モデル診断 ---
+            status_text.text("🔑 AIモデルに接続中...")
             model_name = None
             try:
                 available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                # 優先順位: Flash -> Pro -> その他
-                if any('gemini-1.5-flash' in m for m in available): 
-                    model_name = 'gemini-1.5-flash'
-                elif any('gemini-1.5-pro' in m for m in available): 
-                    model_name = 'gemini-1.5-pro'
-                elif available: 
-                    model_name = available[0].replace('models/', '')
-            except Exception as e:
-                st.error(f"モデル検索エラー: {e}")
-                st.stop()
-                
+                if any('gemini-1.5-flash' in m for m in available): model_name = 'gemini-1.5-flash'
+                elif any('gemini-1.5-pro' in m for m in available): model_name = 'gemini-1.5-pro'
+                elif available: model_name = available[0].replace('models/', '')
+            except: pass
+            
             if not model_name:
-                st.error("使えるAIモデルが見つかりませんでした。APIキーを確認してください。")
+                st.error("AIモデルが見つかりません。APIキーを確認してください。")
                 st.stop()
             
-            # --- 2. 処理開始 ---
+            # --- 処理開始 ---
             with tempfile.TemporaryDirectory() as temp_dir:
-                status_text.text(f"🤖 モデル {model_name} で画像を処理中...")
+                status_text.text(f"📤 写真を解析中... (Model: {model_name})")
                 
                 # 画像準備
                 local_paths = {}
-                seed_file = selected_file
+                seed_file = target_file
                 other_files = [f for f in uploaded_files if f.name != target_name]
                 random.shuffle(other_files)
-                target_files = [seed_file] + other_files[:24] # 計25枚
+                target_files = [seed_file] + other_files[:24] # 核 + ランダム24枚
                 
                 gemini_files = []
                 total = len(target_files)
@@ -98,10 +134,13 @@ if uploaded_files:
                     progress = (i / total) * 0.5
                     progress_bar.progress(progress)
                     
+                    # 毎回シークをリセットして読み込み
+                    file_obj.seek(0)
+                    
                     # 一時保存
                     file_path = os.path.join(temp_dir, file_obj.name)
                     with open(file_path, "wb") as f:
-                        f.write(file_obj.getbuffer())
+                        f.write(file_obj.read())
                     
                     # リサイズ
                     img = Image.open(file_path)
@@ -116,7 +155,7 @@ if uploaded_files:
                     gemini_files.append(g_file)
                     gemini_files.append(f"↑ ファイル名: {file_obj.name}")
 
-                # --- 3. 生成 ---
+                # --- 生成 ---
                 status_text.text("🧠 AIが3つのストーリーを構想中...")
                 progress_bar.progress(0.6)
 
@@ -169,7 +208,6 @@ if uploaded_files:
                     patterns = json.loads(clean_json)
                 except:
                     st.error("AIの応答エラー。もう一度試してください。")
-                    st.write(response.text)
                     st.stop()
                 
                 progress_bar.progress(1.0)
@@ -177,7 +215,7 @@ if uploaded_files:
 
                 # --- 結果表示 ---
                 st.divider()
-                st.subheader("🎉 3つのプラン")
+                st.subheader(f"🎉 「{target_name}」から生まれた物語")
                 
                 tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
                 
@@ -185,10 +223,8 @@ if uploaded_files:
                     if i < len(patterns):
                         pat = patterns[i]
                         with tab:
-                            st.caption(f"テーマ: {pat.get('theme')}")
-                            st.write(f"**{pat.get('story')}**")
-                            with st.expander("選定理由"):
-                                st.write(pat.get('reason'))
+                            st.markdown(f"**{pat.get('story')}**")
+                            st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
                             
                             # 画像特定
                             paths = []
@@ -219,8 +255,12 @@ if uploaded_files:
                                     data=buf.getvalue(),
                                     file_name=f"plan_{i+1}.zip",
                                     mime="application/zip",
-                                    type="primary"
+                                    type="primary",
+                                    key=f"dl_{i}_{target_name}" # ユニークキーでバグ防止
                                 )
 
         except Exception as e:
             st.error(f"エラー: {e}")
+
+else:
+    st.info("👆 上のボックスに写真をドラッグ＆ドロップしてください")
