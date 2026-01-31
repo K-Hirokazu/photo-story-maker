@@ -9,7 +9,7 @@ import zipfile
 import io
 import random
 import tempfile
-import uuid # 毎回違うIDを作るための機能
+import uuid
 
 # --- ページ設定 ---
 st.set_page_config(
@@ -31,6 +31,10 @@ st.markdown("""
         height: auto;
         min_height: 3em;
     }
+    /* スマホでの2x2グリッドの隙間調整 */
+    [data-testid="stVerticalBlock"] > [style*="flex-direction: row"] > [data-testid="column"] {
+        padding: 0 4px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -40,7 +44,7 @@ if 'patterns' not in st.session_state:
 if 'target_name' not in st.session_state:
     st.session_state.target_name = None
 if 'gen_id' not in st.session_state:
-    st.session_state.gen_id = str(uuid.uuid4()) # 初回の整理番号
+    st.session_state.gen_id = str(uuid.uuid4())
 
 # --- タイトル ---
 st.title("📸 AI Photo Story Curator")
@@ -102,7 +106,6 @@ if uploaded_files:
     selected_target = None
     is_random = False
 
-    # ★ここが重要：結果を表示するための「空の箱」を用意しておく★
     result_area = st.empty()
 
     with col1:
@@ -110,7 +113,6 @@ if uploaded_files:
             selected_target = manual_target_file
             start_generation = True
             is_random = False
-            # 古い結果を画面から消す（データは消さずに、見た目だけクリア）
             result_area.empty()
 
     with col2:
@@ -131,12 +133,14 @@ if uploaded_files:
 
         if is_random:
             st.info(f"🎲 おまかせ抽選の結果... **{target_name}** が選ばれました！")
+            # ★ここに追加：選ばれた写真を表示★
+            selected_target.seek(0)
+            st.image(selected_target, width=300, caption="運命の1枚")
         else:
             st.success(f"✅ 選択された写真: **{target_name}**")
 
         genai.configure(api_key=api_key)
         
-        # ステータス表示
         status_text = st.empty()
         progress_bar = st.progress(0)
 
@@ -226,7 +230,6 @@ if uploaded_files:
                 try:
                     clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
                     
-                    # ★ここで新しい整理番号を発行して、DLボタンが被らないようにする★
                     st.session_state.gen_id = str(uuid.uuid4())
                     
                     st.session_state.patterns = json.loads(clean_json)
@@ -242,16 +245,15 @@ if uploaded_files:
             st.error(f"エラー: {e}")
 
 
-    # --- 4. 結果表示エリア（result_areaの中に描画する） ---
+    # --- 4. 結果表示エリア ---
     if st.session_state.patterns:
-        with result_area.container(): # ★このコンテナの中に表示することで、制御しやすくする
+        with result_area.container():
             st.divider()
             st.subheader(f"🎉 「{st.session_state.target_name}」から生まれた物語")
             
             patterns = st.session_state.patterns
             tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
             
-            # 毎回変わるユニークなIDを使ってボタンを作る
             unique_id = st.session_state.gen_id
 
             for i, tab in enumerate(tabs):
@@ -275,6 +277,34 @@ if uploaded_files:
                         if seed_obj: target_files.insert(0, seed_obj)
                         target_files = target_files[:4]
 
+                        if len(target_files) == 4:
+                            # --- ★ここから新機能：スマホ用2x2グリッド表示 ---
+                            st.markdown("#### 📱 プレビュー (2x2)")
+                            st.caption("※スマホで見やすい配置です。多少トリミングされます。")
+                            
+                            # 上の段 (左:0, 右:1)
+                            row1_col1, row1_col2 = st.columns(2)
+                            with row1_col1:
+                                target_files[0].seek(0)
+                                st.image(Image.open(target_files[0]), use_container_width=True)
+                            with row1_col2:
+                                target_files[1].seek(0)
+                                st.image(Image.open(target_files[1]), use_container_width=True)
+                            
+                            # 下の段 (左:2, 右:3)
+                            row2_col1, row2_col2 = st.columns(2)
+                            with row2_col1:
+                                target_files[2].seek(0)
+                                st.image(Image.open(target_files[2]), use_container_width=True)
+                            with row2_col2:
+                                target_files[3].seek(0)
+                                st.image(Image.open(target_files[3]), use_container_width=True)
+
+                        st.divider()
+
+                        # --- 従来の全体表示 (スマホだと縦1列) ---
+                        st.markdown("#### 🖼️ 全体表示 (縦並び)")
+                        st.caption("※写真の全体像です。")
                         cols = st.columns(4)
                         for idx, f_obj in enumerate(target_files):
                             f_obj.seek(0)
@@ -283,6 +313,7 @@ if uploaded_files:
                             cols[idx].image(img_prev, use_container_width=True)
 
                         # ダウンロード
+                        st.divider()
                         st.markdown("#### 📥 ダウンロード")
                         col_dl1, col_dl2 = st.columns(2)
                         text_content = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
@@ -301,7 +332,6 @@ if uploaded_files:
                                 data=buf_orig.getvalue(),
                                 file_name=f"orig_plan_{i+1}.zip",
                                 mime="application/zip",
-                                # ★キーにunique_idを含めることで、ボタンの衝突を防ぐ
                                 key=f"dl_orig_{i}_{unique_id}"
                             )
 
@@ -324,10 +354,8 @@ if uploaded_files:
                                 file_name=f"sns_plan_{i+1}.zip",
                                 mime="application/zip",
                                 type="primary",
-                                # ★キーにunique_idを含めることで、ボタンの衝突を防ぐ
                                 key=f"dl_sns_{i}_{unique_id}"
                             )
 
 else:
     st.info("👆 上のボックスに写真をドラッグ＆ドロップしてください")
-    
