@@ -10,7 +10,6 @@ import io
 import random
 import tempfile
 import uuid
-import base64
 import time
 
 # --- ページ設定 ---
@@ -20,16 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 画像をbase64に変換する関数 ---
-def img_to_base64(img_path):
-    try:
-        with open(img_path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
-    except:
-        return ""
-
-# --- カスタムCSS ---
+# --- カスタムCSS（ボタンのみ） ---
 st.markdown("""
 <style>
     .stButton>button {
@@ -42,36 +32,25 @@ st.markdown("""
         height: auto;
         min_height: 3em;
     }
-    .twitter-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        grid-template-rows: 1fr 1fr;
-        gap: 2px;
-        width: 100%;
-        max-width: 600px;
-        margin: 0 auto;
-        aspect-ratio: 16 / 9;
-        border-radius: 12px;
-        overflow: hidden;
-    }
-    @media (max-width: 640px) {
-        .twitter-grid {
-            aspect-ratio: 3 / 2;
-        }
-    }
-    .grid-item {
-        width: 100%;
-        height: 100%;
-        position: relative;
-    }
-    .grid-item img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-    }
 </style>
 """, unsafe_allow_html=True)
+
+# --- モデル自動選択関数 ---
+def get_best_model():
+    """使えるモデルを自動で探す"""
+    try:
+        models = genai.list_models()
+        valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+        # 優先順位
+        targets = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+        
+        for t in targets:
+            for m in valid_models:
+                if t in m: return m
+        if valid_models: return valid_models[0]
+    except:
+        pass
+    return "gemini-1.5-flash"
 
 # --- セッション初期化 ---
 if 'patterns' not in st.session_state: st.session_state.patterns = None
@@ -84,7 +63,7 @@ if 'temp_dir_obj' not in st.session_state: st.session_state.temp_dir_obj = None
 st.title("📸 AI Photo Story Curator")
 st.caption("アップロードした写真から「最高の4枚」を選び、物語を作ります。")
 
-# --- サイドバー（設定エリア） ---
+# サイドバー
 with st.sidebar:
     st.header("⚙️ 設定")
     api_key = st.text_input("Gemini API Key", type="password")
@@ -92,33 +71,22 @@ with st.sidebar:
     
     st.divider()
     
-    # ★ここが修正ポイント：モデル一覧を動的に取得する★
-    selected_model_name = "models/gemini-1.5-flash" # デフォルト
-    
+    # モデル選択ロジック
+    selected_model_name = "models/gemini-1.5-flash"
     if api_key:
         try:
             genai.configure(api_key=api_key)
-            # モデル一覧を取得
             models_list = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             
-            # Flash系を優先的にデフォルトにする
             default_index = 0
             for i, m in enumerate(models_list):
                 if 'flash' in m and '1.5' in m:
                     default_index = i
                     break
             
-            selected_model_name = st.selectbox(
-                "使用するAIモデル",
-                models_list,
-                index=default_index,
-                help="リストに出てくるモデルは確実に使用可能です"
-            )
-            st.success("✅ 接続成功")
-        except Exception as e:
-            st.error(f"キーが無効か、接続できません: {e}")
-    else:
-        st.info("APIキーを入力するとモデル一覧が表示されます")
+            selected_model_name = st.selectbox("使用するAIモデル", models_list, index=default_index)
+        except:
+            st.warning("APIキーを確認してください")
 
 uploaded_files = st.file_uploader("1. 写真をアップロード", accept_multiple_files=True, type=['jpg','jpeg','png','heic','webp'])
 
@@ -175,7 +143,6 @@ if uploaded_files:
         else:
             st.success(f"✅ 選択中: **{target_file.name}**")
         
-        # 設定されたキーとモデルを使用
         genai.configure(api_key=api_key)
         status = st.empty()
         bar = st.progress(0)
@@ -183,7 +150,7 @@ if uploaded_files:
         try:
             status.text("AI準備中...")
             
-            # 一時保存処理
+            # 一時保存
             if st.session_state.temp_dir_obj: st.session_state.temp_dir_obj.cleanup()
             st.session_state.temp_dir_obj = tempfile.TemporaryDirectory()
             td = st.session_state.temp_dir_obj.name
@@ -230,12 +197,11 @@ if uploaded_files:
                 ]"""
             ] + gemini_inputs
             
-            # ★サイドバーで選ばれたモデルを確実に使う
             model = genai.GenerativeModel(selected_model_name)
             res = model.generate_content(prompt)
             
             json_match = re.search(r'\[.*\]', res.text, re.DOTALL)
-            if not json_match: raise Exception("AIの応答解析に失敗しました。もう一度お試しください。")
+            if not json_match: raise Exception("AIの応答解析に失敗")
             
             st.session_state.patterns = json.loads(json_match.group())
             st.session_state.target_name = target_file.name
@@ -246,9 +212,9 @@ if uploaded_files:
             
         except Exception as e:
             if "429" in str(e):
-                st.error("⚠️ 使いすぎのためGoogleに制限されました。数分待ってから再度お試しください。")
+                st.error("⚠️ 使いすぎのため制限されました。少し時間を空けてください。")
             else:
-                st.error(f"エラーが発生しました: {e}")
+                st.error(f"エラー: {e}")
 
     # --- 結果表示 ---
     if st.session_state.patterns:
@@ -268,10 +234,14 @@ if uploaded_files:
                     st.write(f"**{pat.get('story')}**")
                     st.caption(f"理由: {pat.get('reason')}")
                     
+                    # 画像集めロジック (必ず4枚集める)
                     final_files = []
+                    
+                    # 1. 核となる写真
                     seed_path = paths_map.get(st.session_state.target_name)
                     if seed_path: final_files.append(seed_path)
                     
+                    # 2. AI選出写真
                     ai_files = pat.get('files', [])
                     for name in ai_files:
                         if len(final_files) >= 4: break
@@ -281,6 +251,7 @@ if uploaded_files:
                                 final_files.append(local_path)
                                 break
                     
+                    # 3. 不足分を補充
                     if len(final_files) < 4:
                         all_vals = list(paths_map.values())
                         remain = [p for p in all_vals if p not in final_files]
@@ -289,36 +260,26 @@ if uploaded_files:
                     
                     show_files = final_files[:4]
                     
-                    if len(show_files) == 4:
-                        st.markdown("#### 📱 プレビュー (2x2)")
-                        b64s = [img_to_base64(p) for p in show_files]
-                        grid_html = f"""
-                        <div class="twitter-grid">
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[0]}"></div>
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[1]}"></div>
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[2]}"></div>
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[3]}"></div>
-                        </div>
-                        """
-                        st.markdown(grid_html, unsafe_allow_html=True)
-                    
-                    st.divider()
-                    st.markdown("#### 🖼️ 全体表示")
+                    # --- シンプルな標準表示 ---
+                    st.markdown("#### 🖼️ 選択された4枚")
                     cols = st.columns(4)
                     for idx, p in enumerate(show_files):
                         cols[idx].image(p, use_container_width=True)
                         
+                    # ダウンロード
                     st.divider()
                     dl_cols = st.columns(2)
                     txt = f"テーマ: {pat.get('theme')}\nストーリー: {pat.get('story')}"
                     uid = st.session_state.gen_id
                     
+                    # オリジナル
                     buf = io.BytesIO()
                     with zipfile.ZipFile(buf, "w") as z:
                         for p in show_files: z.write(p, os.path.basename(p))
                         z.writestr("story.txt", txt)
                     dl_cols[0].download_button("📦 オリジナル保存", buf.getvalue(), f"orig_{i+1}.zip", "application/zip", key=f"d1_{i}_{uid}")
                     
+                    # SNS用
                     buf2 = io.BytesIO()
                     with zipfile.ZipFile(buf2, "w") as z:
                         for p in show_files:
