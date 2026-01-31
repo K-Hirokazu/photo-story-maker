@@ -84,20 +84,41 @@ if 'temp_dir_obj' not in st.session_state: st.session_state.temp_dir_obj = None
 st.title("📸 AI Photo Story Curator")
 st.caption("アップロードした写真から「最高の4枚」を選び、物語を作ります。")
 
-# サイドバー設定
+# --- サイドバー（設定エリア） ---
 with st.sidebar:
     st.header("⚙️ 設定")
     api_key = st.text_input("Gemini API Key", type="password")
     st.markdown("[🔑 キー取得](https://aistudio.google.com/app/apikey)")
     
     st.divider()
-    # モデル選択（デフォルトをFlashに固定）
-    model_option = st.selectbox(
-        "AIモデル (Flash推奨)", 
-        ["gemini-1.5-flash", "gemini-1.5-pro"],
-        index=0, # Flashを初期値に
-        help="エラーが出る場合はFlashを選んでください"
-    )
+    
+    # ★ここが修正ポイント：モデル一覧を動的に取得する★
+    selected_model_name = "models/gemini-1.5-flash" # デフォルト
+    
+    if api_key:
+        try:
+            genai.configure(api_key=api_key)
+            # モデル一覧を取得
+            models_list = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            
+            # Flash系を優先的にデフォルトにする
+            default_index = 0
+            for i, m in enumerate(models_list):
+                if 'flash' in m and '1.5' in m:
+                    default_index = i
+                    break
+            
+            selected_model_name = st.selectbox(
+                "使用するAIモデル",
+                models_list,
+                index=default_index,
+                help="リストに出てくるモデルは確実に使用可能です"
+            )
+            st.success("✅ 接続成功")
+        except Exception as e:
+            st.error(f"キーが無効か、接続できません: {e}")
+    else:
+        st.info("APIキーを入力するとモデル一覧が表示されます")
 
 uploaded_files = st.file_uploader("1. 写真をアップロード", accept_multiple_files=True, type=['jpg','jpeg','png','heic','webp'])
 
@@ -154,6 +175,7 @@ if uploaded_files:
         else:
             st.success(f"✅ 選択中: **{target_file.name}**")
         
+        # 設定されたキーとモデルを使用
         genai.configure(api_key=api_key)
         status = st.empty()
         bar = st.progress(0)
@@ -166,7 +188,7 @@ if uploaded_files:
             st.session_state.temp_dir_obj = tempfile.TemporaryDirectory()
             td = st.session_state.temp_dir_obj.name
             
-            status.text(f"画像を解析中... ({model_option})")
+            status.text(f"画像を解析中... ({selected_model_name})")
             
             st.session_state.local_paths = {}
             others = [f for f in uploaded_files if f.name != target_file.name]
@@ -208,11 +230,12 @@ if uploaded_files:
                 ]"""
             ] + gemini_inputs
             
-            model = genai.GenerativeModel(model_option)
+            # ★サイドバーで選ばれたモデルを確実に使う
+            model = genai.GenerativeModel(selected_model_name)
             res = model.generate_content(prompt)
             
             json_match = re.search(r'\[.*\]', res.text, re.DOTALL)
-            if not json_match: raise Exception("AIの応答解析に失敗")
+            if not json_match: raise Exception("AIの応答解析に失敗しました。もう一度お試しください。")
             
             st.session_state.patterns = json.loads(json_match.group())
             st.session_state.target_name = target_file.name
@@ -223,9 +246,9 @@ if uploaded_files:
             
         except Exception as e:
             if "429" in str(e):
-                st.error("⚠️ 使いすぎのためGoogleに制限されました。1分ほど待ってから「gemini-1.5-flash」で試してください。")
+                st.error("⚠️ 使いすぎのためGoogleに制限されました。数分待ってから再度お試しください。")
             else:
-                st.error(f"エラー: {e}")
+                st.error(f"エラーが発生しました: {e}")
 
     # --- 結果表示 ---
     if st.session_state.patterns:
