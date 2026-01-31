@@ -27,6 +27,11 @@ st.markdown("""
         font-weight: bold;
         height: 3em;
     }
+    /* ダウンロードボタンのスタイル調整 */
+    div[data-testid="column"] button {
+        height: auto;
+        min_height: 3em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -54,7 +59,6 @@ if uploaded_files:
     # --- 2. ギャラリー選択 ---
     st.markdown("### 2. 「核」となる写真を選ぶ（またはおまかせ）")
     
-    # プレビュー画像の準備
     preview_imgs = []
     display_limit = 100 
     
@@ -64,7 +68,6 @@ if uploaded_files:
         img.thumbnail((150, 150))
         preview_imgs.append(img)
 
-    # ギャラリー表示
     selected_index = image_select(
         label="",
         images=preview_imgs,
@@ -116,7 +119,6 @@ if uploaded_files:
         progress_bar = st.progress(0)
         
         try:
-            # モデル診断
             status_text.text("🔑 AIモデルに接続中...")
             model_name = None
             try:
@@ -130,13 +132,10 @@ if uploaded_files:
                 st.error("AIモデルが見つかりません。APIキーを確認してください。")
                 st.stop()
             
-            # --- 画像処理 ---
             with tempfile.TemporaryDirectory() as temp_dir:
                 status_text.text(f"📤 写真を解析中... (Core: {target_name})")
                 
-                # パス管理用辞書
-                local_paths_original = {} # 高画質用（ダウンロード用）
-                local_paths_resized = {}  # AI用（アップロード用）
+                local_paths_original = {} 
                 
                 seed_file = target_file
                 other_files = [f for f in uploaded_files if f.name != target_name]
@@ -150,142 +149,4 @@ if uploaded_files:
                     progress = (i / total) * 0.5
                     progress_bar.progress(progress)
                     
-                    file_obj.seek(0)
-                    
-                    # 1. まずオリジナル（高画質）を保存
-                    original_path = os.path.join(temp_dir, f"original_{file_obj.name}")
-                    with open(original_path, "wb") as f:
-                        f.write(file_obj.read())
-                    
-                    local_paths_original[file_obj.name] = original_path # ダウンロード用リストに登録
-
-                    # 2. AI用にリサイズ版を作成
-                    resized_path = os.path.join(temp_dir, f"resized_{file_obj.name}")
-                    img = Image.open(original_path)
-                    img.thumbnail((1024, 1024)) # AIには1024pxで十分
-                    if img.mode != "RGB": img = img.convert("RGB")
-                    img.save(resized_path, "JPEG")
-                    
-                    # 3. リサイズ版をアップロード
-                    g_file = genai.upload_file(resized_path, mime_type="image/jpeg")
-                    gemini_files.append(g_file)
-                    gemini_files.append(f"↑ ファイル名: {file_obj.name}")
-
-                # --- 生成 ---
-                status_text.text("🧠 AIが3つのストーリーを構想中...")
-                progress_bar.progress(0.6)
-
-                prompt = [
-                    f"あなたは写真編集者です。リストから「{target_name}」を核として、異なる視点の『4枚組』を3パターン作成してください。",
-                    "【重要】写真はリストにあるものから選び、ファイル名は正確に記述すること。",
-                    "## 作成パターン",
-                    "1. 【Visual Harmony】: 色彩・構図重視",
-                    "2. 【Emotional Flow】: 感情・空気感重視",
-                    "3. 【Narrative Story】: 物語性重視",
-                    "## 出力形式 (JSONのみ)",
-                    """
-                    [
-                        {
-                            "id": 1,
-                            "theme": "Visual Harmony",
-                            "files": ["file1", "file2", "file3", "file4"],
-                            "story": "解説(100字)",
-                            "reason": "理由"
-                        },
-                        {
-                            "id": 2,
-                            "theme": "Emotional Flow",
-                            "files": ["file1", "file2", "file3", "file4"],
-                            "story": "解説(100字)",
-                            "reason": "理由"
-                        },
-                        {
-                            "id": 3,
-                            "theme": "Narrative Story",
-                            "files": ["file1", "file2", "file3", "file4"],
-                            "story": "解説(100字)",
-                            "reason": "理由"
-                        }
-                    ]
-                    """,
-                    "\n--- 写真リスト ---"
-                ]
-                prompt.extend(gemini_files)
-
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                
-                progress_bar.progress(0.9)
-                status_text.text("✨ 完成！")
-
-                try:
-                    clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
-                    patterns = json.loads(clean_json)
-                except:
-                    st.error("AIの応答エラー。もう一度試してください。")
-                    st.stop()
-                
-                progress_bar.progress(1.0)
-                status_text.empty()
-
-                # --- 結果表示 ---
-                st.divider()
-                st.subheader(f"🎉 「{target_name}」から生まれた物語")
-                
-                tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
-                
-                for i, tab in enumerate(tabs):
-                    if i < len(patterns):
-                        pat = patterns[i]
-                        with tab:
-                            st.markdown(f"**{pat.get('story')}**")
-                            st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
-                            
-                            # 画像特定（ここではオリジナル画質のパスを取得！）
-                            paths = []
-                            for fname in pat.get('files', []):
-                                match = next((n for n in local_paths_original if fname in n or n in fname), None)
-                                if match: paths.append(local_paths_original[match])
-                            
-                            # 核となる写真が抜けていたら追加
-                            seed_original_path = local_paths_original.get(target_name)
-                            if seed_original_path and seed_original_path not in paths:
-                                paths.insert(0, seed_original_path)
-                            paths = paths[:4]
-                            
-                            # プレビュー表示
-                            cols = st.columns(4)
-                            for idx, p in enumerate(paths):
-                                # 表示用には少し軽くして読み込む（ブラウザ負荷軽減）
-                                img_preview = Image.open(p)
-                                img_preview.thumbnail((800, 800)) 
-                                cols[idx].image(img_preview, use_container_width=True)
-                            
-                            # ダウンロード（ここ重要：オリジナルファイルをZIPにする）
-                            if paths:
-                                buf = io.BytesIO()
-                                with zipfile.ZipFile(buf, "w") as z:
-                                    for p in paths:
-                                        # 元のファイル名で保存
-                                        # ファイルパスは 'temp/original_IMG_123.jpg' だが、
-                                        # ZIPの中では 'IMG_123.jpg' に戻す処理
-                                        clean_name = os.path.basename(p).replace("original_", "")
-                                        z.write(p, clean_name)
-                                    
-                                    txt = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
-                                    z.writestr("story.txt", txt)
-                                
-                                st.download_button(
-                                    f"📦 プラン{i+1}を保存 (高画質)",
-                                    data=buf.getvalue(),
-                                    file_name=f"plan_{i+1}.zip",
-                                    mime="application/zip",
-                                    type="primary",
-                                    key=f"dl_{i}_{target_name}"
-                                )
-
-        except Exception as e:
-            st.error(f"エラー: {e}")
-
-else:
-    st.info("👆 上のボックスに写真をドラッグ＆ドロップしてください")
+                    file_obj
