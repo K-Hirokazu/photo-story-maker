@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- カスタムCSS（ボタンを見やすく） ---
+# --- カスタムCSS ---
 st.markdown("""
 <style>
     .stButton>button {
@@ -34,7 +34,7 @@ st.markdown("""
 st.title("📸 AI Photo Story Curator")
 st.caption("アップロードした写真群から、AIが「最高の4枚」を選び出し、物語を紡ぎます。")
 
-# --- サイドバー：設定 ---
+# --- サイドバー ---
 with st.sidebar:
     st.header("⚙️ 設定")
     api_key = st.text_input("Gemini API Key", type="password", help="Google AI Studioで取得したキー")
@@ -74,26 +74,22 @@ if uploaded_files:
         use_container_width=False
     )
     
-    # 手動選択されたファイル
     manual_target_file = uploaded_files[selected_index]
 
-    # --- 3. アクションボタン（2つ並べる） ---
+    # --- 3. アクションボタン ---
     st.markdown("### 3. 生成スタート")
     col1, col2 = st.columns(2)
     
-    # 変数の初期化
     target_file = None
     run_generation = False
     is_random_mode = False
 
     with col1:
-        # A. 手動選択ボタン
         if st.button(f"🚀 選択した写真で作る\n({manual_target_file.name})", type="primary"):
             target_file = manual_target_file
             run_generation = True
 
     with col2:
-        # B. おまかせボタン
         if st.button("🎲 おまかせ (ランダム) で作る"):
             target_file = random.choice(uploaded_files)
             run_generation = True
@@ -103,16 +99,13 @@ if uploaded_files:
     if run_generation and target_file:
         target_name = target_file.name
         
-        # おまかせの場合、どれが選ばれたか表示
         if is_random_mode:
             st.info(f"🎲 運命の1枚が選ばれました: **{target_name}**")
-            # 選ばれた画像を表示
             target_file.seek(0)
             st.image(target_file, width=300, caption="AIが選んだ核となる写真")
         else:
             st.success(f"✅ 選択中: **{target_name}**")
 
-        # APIキーチェック
         if not api_key:
             st.error("⚠️ 左のサイドバーでAPIキーを入力してください")
             st.stop()
@@ -141,13 +134,14 @@ if uploaded_files:
             with tempfile.TemporaryDirectory() as temp_dir:
                 status_text.text(f"📤 写真を解析中... (Core: {target_name})")
                 
-                local_paths = {}
-                seed_file = target_file
+                # パス管理用辞書
+                local_paths_original = {} # 高画質用（ダウンロード用）
+                local_paths_resized = {}  # AI用（アップロード用）
                 
-                # 核以外のリストを作成
+                seed_file = target_file
                 other_files = [f for f in uploaded_files if f.name != target_name]
                 random.shuffle(other_files)
-                target_files = [seed_file] + other_files[:24] # 核 + ランダム24枚
+                target_files = [seed_file] + other_files[:24] 
                 
                 gemini_files = []
                 total = len(target_files)
@@ -157,21 +151,27 @@ if uploaded_files:
                     progress_bar.progress(progress)
                     
                     file_obj.seek(0)
-                    file_path = os.path.join(temp_dir, file_obj.name)
-                    with open(file_path, "wb") as f:
+                    
+                    # 1. まずオリジナル（高画質）を保存
+                    original_path = os.path.join(temp_dir, f"original_{file_obj.name}")
+                    with open(original_path, "wb") as f:
                         f.write(file_obj.read())
                     
-                    img = Image.open(file_path)
-                    img.thumbnail((1024, 1024))
+                    local_paths_original[file_obj.name] = original_path # ダウンロード用リストに登録
+
+                    # 2. AI用にリサイズ版を作成
+                    resized_path = os.path.join(temp_dir, f"resized_{file_obj.name}")
+                    img = Image.open(original_path)
+                    img.thumbnail((1024, 1024)) # AIには1024pxで十分
                     if img.mode != "RGB": img = img.convert("RGB")
-                    img.save(file_path, "JPEG")
+                    img.save(resized_path, "JPEG")
                     
-                    local_paths[file_obj.name] = file_path
-                    g_file = genai.upload_file(file_path, mime_type="image/jpeg")
+                    # 3. リサイズ版をアップロード
+                    g_file = genai.upload_file(resized_path, mime_type="image/jpeg")
                     gemini_files.append(g_file)
                     gemini_files.append(f"↑ ファイル名: {file_obj.name}")
 
-                # --- プロンプト ---
+                # --- 生成 ---
                 status_text.text("🧠 AIが3つのストーリーを構想中...")
                 progress_bar.progress(0.6)
 
@@ -241,29 +241,42 @@ if uploaded_files:
                             st.markdown(f"**{pat.get('story')}**")
                             st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
                             
+                            # 画像特定（ここではオリジナル画質のパスを取得！）
                             paths = []
                             for fname in pat.get('files', []):
-                                match = next((n for n in local_paths if fname in n or n in fname), None)
-                                if match: paths.append(local_paths[match])
+                                match = next((n for n in local_paths_original if fname in n or n in fname), None)
+                                if match: paths.append(local_paths_original[match])
                             
-                            if local_paths.get(target_name) and local_paths[target_name] not in paths:
-                                paths.insert(0, local_paths[target_name])
+                            # 核となる写真が抜けていたら追加
+                            seed_original_path = local_paths_original.get(target_name)
+                            if seed_original_path and seed_original_path not in paths:
+                                paths.insert(0, seed_original_path)
                             paths = paths[:4]
                             
+                            # プレビュー表示
                             cols = st.columns(4)
                             for idx, p in enumerate(paths):
-                                cols[idx].image(p, use_container_width=True)
+                                # 表示用には少し軽くして読み込む（ブラウザ負荷軽減）
+                                img_preview = Image.open(p)
+                                img_preview.thumbnail((800, 800)) 
+                                cols[idx].image(img_preview, use_container_width=True)
                             
+                            # ダウンロード（ここ重要：オリジナルファイルをZIPにする）
                             if paths:
                                 buf = io.BytesIO()
                                 with zipfile.ZipFile(buf, "w") as z:
                                     for p in paths:
-                                        z.write(p, os.path.basename(p))
+                                        # 元のファイル名で保存
+                                        # ファイルパスは 'temp/original_IMG_123.jpg' だが、
+                                        # ZIPの中では 'IMG_123.jpg' に戻す処理
+                                        clean_name = os.path.basename(p).replace("original_", "")
+                                        z.write(p, clean_name)
+                                    
                                     txt = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
                                     z.writestr("story.txt", txt)
                                 
                                 st.download_button(
-                                    f"📦 プラン{i+1}を保存",
+                                    f"📦 プラン{i+1}を保存 (高画質)",
                                     data=buf.getvalue(),
                                     file_name=f"plan_{i+1}.zip",
                                     mime="application/zip",
