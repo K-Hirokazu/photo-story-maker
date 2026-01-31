@@ -145,8 +145,4 @@ if uploaded_files:
                 gemini_files = []
                 total = len(target_files)
                 
-                for i, file_obj in enumerate(target_files):
-                    progress = (i / total) * 0.5
-                    progress_bar.progress(progress)
-                    
-                    file_obj
+                for i, file_obj in enumerate(target
