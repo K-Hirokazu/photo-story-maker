@@ -21,19 +21,20 @@ st.set_page_config(
 
 # --- 画像をbase64に変換する関数 ---
 def img_to_base64(img_path):
-    with open(img_path, "rb") as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
+    try:
+        with open(img_path, "rb") as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    except Exception:
+        return ""
 
 # --- 頑丈なモデル選択関数 ---
 def get_best_model():
     """利用可能なモデルの中からベストなものを自動で探す"""
     try:
-        # 1. Googleに使えるモデル一覧を問い合わせる
         all_models = list(genai.list_models())
         available_names = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
         
-        # 優先順位リスト（上から順に探す）
         priorities = [
             'models/gemini-1.5-flash',
             'models/gemini-1.5-flash-latest',
@@ -43,25 +44,21 @@ def get_best_model():
             'models/gemini-pro'
         ]
         
-        # 2. 完全一致で探す
         for p in priorities:
             if p in available_names:
                 return p
         
-        # 3. 部分一致で探す（"flash" が含まれるものを優先）
         for name in available_names:
             if 'flash' in name and '1.5' in name:
                 return name
         
-        # 4. どうしても見つからなければリストの最初を使う
         if available_names:
             return available_names[0]
             
-    except Exception as e:
-        # エラーが起きてもデフォルトを返す
+    except Exception:
         pass
     
-    return 'gemini-1.5-flash' # 最終手段
+    return 'gemini-1.5-flash'
 
 # --- カスタムCSS ---
 st.markdown("""
@@ -103,6 +100,7 @@ st.markdown("""
         width: 100%;
         height: 100%;
         position: relative;
+        background-color: #f0f0f0; /* 画像がない時の背景 */
     }
     .grid-item img {
         width: 100%;
@@ -124,6 +122,8 @@ if 'local_paths' not in st.session_state:
     st.session_state.local_paths = {}
 if 'temp_dir_obj' not in st.session_state:
     st.session_state.temp_dir_obj = None
+if 'candidate_files' not in st.session_state: # AIに渡した候補リストを保存
+    st.session_state.candidate_files = []
 
 # --- タイトル ---
 st.title("📸 AI Photo Story Curator")
@@ -211,17 +211,12 @@ if uploaded_files:
             st.success(f"✅ 選択された写真: **{target_name}**")
 
         genai.configure(api_key=api_key)
-        
         status_text = st.empty()
         progress_bar = st.progress(0)
 
         try:
             status_text.text("🔑 AIモデルに接続中...")
-            
-            # ★ここで自動検出したモデルを使う
             target_model_name = get_best_model()
-            # 念のためどのモデルが選ばれたかログに出す（デバッグ用）
-            print(f"Selected Model: {target_model_name}") 
             
             # ディレクトリ管理
             if st.session_state.temp_dir_obj:
@@ -230,18 +225,22 @@ if uploaded_files:
             temp_dir = st.session_state.temp_dir_obj.name
             
             st.session_state.local_paths = {}
+            st.session_state.candidate_files = [] # 候補リスト初期化
 
             status_text.text(f"📤 写真を解析中... (Model: {target_model_name})")
             
             seed_file = selected_target
             other_files = [f for f in uploaded_files if f.name != target_name]
             random.shuffle(other_files)
+            # AIに渡す候補リスト（最大25枚）
             target_files = [seed_file] + other_files[:24]
+            
+            # 候補リストの名前を保存しておく（補充用）
+            st.session_state.candidate_files = [f.name for f in target_files]
             
             gemini_files = []
             total = len(target_files)
             
-            # 画像処理
             for i, file_obj in enumerate(target_files):
                 progress = (i / total) * 0.5
                 progress_bar.progress(progress)
@@ -313,7 +312,6 @@ if uploaded_files:
                 st.session_state.target_name = target_name
             except:
                 st.error("AIの応答エラー。もう一度試してください。")
-                st.write(response.text) # エラー時に生ログを表示
                 st.stop()
 
             progress_bar.progress(1.0)
@@ -332,6 +330,7 @@ if uploaded_files:
             tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
             unique_id = st.session_state.gen_id
             local_paths = st.session_state.local_paths
+            candidates = st.session_state.candidate_files
 
             for i, tab in enumerate(tabs):
                 if i < len(patterns):
@@ -340,23 +339,48 @@ if uploaded_files:
                         st.markdown(f"**{pat.get('story')}**")
                         st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
                         
+                        # --- パス解決ロジック（強化版）---
                         target_paths = []
+                        
+                        # 1. 核となる写真を確保
                         seed_path = local_paths.get(st.session_state.target_name)
+                        if seed_path:
+                            target_paths.append(seed_path)
                         
+                        # 2. AIが選んだ写真を検索（あいまい検索）
                         for name in pat.get('files', []):
+                            # すでに4枚あったら終了
+                            if len(target_paths) >= 4:
+                                break
+                                
+                            found_path = None
+                            # 完全一致または部分一致で探す（大文字小文字無視）
                             for fname, fpath in local_paths.items():
-                                if name in fname or fname in name:
-                                    if fname != st.session_state.target_name:
-                                        target_paths.append(fpath)
-                                        break
+                                if (name.lower() in fname.lower() or fname.lower() in name.lower()) and fpath not in target_paths:
+                                    found_path = fpath
+                                    break
+                            
+                            if found_path:
+                                target_paths.append(found_path)
                         
-                        if seed_path: target_paths.insert(0, seed_path)
+                        # 3. 【重要】4枚に満たない場合の補充ロジック
+                        if len(target_paths) < 4:
+                            # 候補リストから、まだ選ばれていない写真を探して補充
+                            remaining = [local_paths[f] for f in candidates if local_paths.get(f) and local_paths[f] not in target_paths]
+                            needed = 4 - len(target_paths)
+                            # ランダムに補充
+                            supplement = random.sample(remaining, min(needed, len(remaining)))
+                            target_paths.extend(supplement)
+
+                        # 4枚に切り詰め（念のため）
                         target_paths = target_paths[:4]
 
                         # --- X風 2x2 グリッド ---
+                        # 4枚揃っている場合のみ綺麗に表示
                         if len(target_paths) == 4:
                             st.markdown("#### 📱 プレビュー (2x2)")
                             b64_imgs = [img_to_base64(p) for p in target_paths]
+                            
                             html_grid = f"""
                             <div class="twitter-grid">
                                 <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[0]}"></div>
@@ -366,6 +390,8 @@ if uploaded_files:
                             </div>
                             """
                             st.markdown(html_grid, unsafe_allow_html=True)
+                        else:
+                            st.warning(f"画像が不足しています（{len(target_paths)}枚）。アップロード枚数を確認してください。")
                         
                         st.divider()
 
