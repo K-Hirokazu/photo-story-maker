@@ -11,7 +11,6 @@ import random
 import tempfile
 import uuid
 import base64
-import time
 
 # --- ページ設定 ---
 st.set_page_config(
@@ -20,16 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 画像をbase64に変換する関数 ---
-def img_to_base64(img_path):
-    try:
-        with open(img_path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
-    except:
-        return ""
-
-# --- カスタムCSS ---
+# --- カスタムCSS（ボタンのデザインのみ残す） ---
 st.markdown("""
 <style>
     /* ボタンデザイン */
@@ -42,35 +32,6 @@ st.markdown("""
     div[data-testid="column"] button {
         height: auto;
         min_height: 3em;
-    }
-    /* X風 2x2グリッド */
-    .twitter-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        grid-template-rows: 1fr 1fr;
-        gap: 2px;
-        width: 100%;
-        max-width: 600px;
-        margin: 0 auto;
-        aspect-ratio: 16 / 9;
-        border-radius: 12px;
-        overflow: hidden;
-    }
-    @media (max-width: 640px) {
-        .twitter-grid {
-            aspect-ratio: 3 / 2;
-        }
-    }
-    .grid-item {
-        width: 100%;
-        height: 100%;
-        position: relative;
-    }
-    .grid-item img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -340,24 +301,8 @@ if uploaded_files:
                     
                     show_files = final_files[:4]
                     
-                    # --- X風 2x2 グリッド ---
-                    if len(show_files) == 4:
-                        st.markdown("#### 📱 プレビュー (2x2)")
-                        b64s = [img_to_base64(p) for p in show_files]
-                        grid_html = f"""
-                        <div class="twitter-grid">
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[0]}"></div>
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[1]}"></div>
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[2]}"></div>
-                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[3]}"></div>
-                        </div>
-                        """
-                        st.markdown(grid_html, unsafe_allow_html=True)
-                    
-                    st.divider()
-                    
-                    # --- 全体表示 ---
-                    st.markdown("#### 🖼️ 全体表示")
+                    # --- シンプルな横4枚表示 ---
+                    st.markdown("#### 🖼️ 選択された4枚")
                     cols = st.columns(4)
                     for idx, p in enumerate(show_files):
                         cols[idx].image(p, use_container_width=True)
