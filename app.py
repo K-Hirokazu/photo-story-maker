@@ -10,6 +10,7 @@ import io
 import random
 import tempfile
 import uuid
+import base64
 import time
 
 # --- ページ設定 ---
@@ -19,9 +20,19 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- カスタムCSS（ボタンのみ） ---
+# --- 画像をbase64に変換する関数 ---
+def img_to_base64(img_path):
+    try:
+        with open(img_path, "rb") as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    except:
+        return ""
+
+# --- カスタムCSS ---
 st.markdown("""
 <style>
+    /* ボタンデザイン */
     .stButton>button {
         width: 100%;
         border-radius: 20px;
@@ -32,6 +43,35 @@ st.markdown("""
         height: auto;
         min_height: 3em;
     }
+    /* X風 2x2グリッド */
+    .twitter-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 2px;
+        width: 100%;
+        max-width: 600px;
+        margin: 0 auto;
+        aspect-ratio: 16 / 9;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    @media (max-width: 640px) {
+        .twitter-grid {
+            aspect-ratio: 3 / 2;
+        }
+    }
+    .grid-item {
+        width: 100%;
+        height: 100%;
+        position: relative;
+    }
+    .grid-item img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -41,7 +81,7 @@ def get_best_model():
     try:
         models = genai.list_models()
         valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        # 優先順位
+        # 優先順位: Flash系を優先（速度・制限回避のため）
         targets = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
         
         for t in targets:
@@ -71,7 +111,7 @@ with st.sidebar:
     
     st.divider()
     
-    # モデル選択ロジック
+    # モデル選択ロジック（自動 + 手動オーバーライド）
     selected_model_name = "models/gemini-1.5-flash"
     if api_key:
         try:
@@ -93,6 +133,7 @@ uploaded_files = st.file_uploader("1. 写真をアップロード", accept_multi
 if uploaded_files:
     st.markdown("### 2. 「核」となる写真を選ぶ")
     
+    # 表示数制限（軽量化）
     display_files = uploaded_files[:100]
     preview_imgs = []
     
@@ -150,7 +191,7 @@ if uploaded_files:
         try:
             status.text("AI準備中...")
             
-            # 一時保存
+            # 一時保存（前のキャッシュをクリア）
             if st.session_state.temp_dir_obj: st.session_state.temp_dir_obj.cleanup()
             st.session_state.temp_dir_obj = tempfile.TemporaryDirectory()
             td = st.session_state.temp_dir_obj.name
@@ -168,10 +209,12 @@ if uploaded_files:
                 bar.progress((i / len(process_files)) * 0.5)
                 f_obj.seek(0)
                 
+                # オリジナル保存
                 path = os.path.join(td, f_obj.name)
                 with open(path, "wb") as f: f.write(f_obj.read())
                 st.session_state.local_paths[f_obj.name] = path
                 
+                # AI用リサイズ
                 img = Image.open(path)
                 img.thumbnail((1024, 1024))
                 if img.mode != 'RGB': img = img.convert('RGB')
@@ -186,14 +229,51 @@ if uploaded_files:
             status.text("ストーリー構成中...")
             bar.progress(0.6)
             
+            # --- プロ仕様プロンプト ---
             prompt = [
-                f"あなたは写真編集者です。リストの「{target_file.name}」を核に、4枚組の作品を3パターン作ってください。",
-                "ファイル名は正確に答えてください。",
-                "出力は以下のJSON形式のみ:",
+                f"あなたは世界的に有名な写真集の編集者であり、SNSで10万いいねを集めるカリスマ・キュレーターです。",
+                f"提供された写真リストから、「{target_file.name}」を核（1枚目または2枚目に配置）として、",
+                "見る人の心を動かす『最強の4枚組』を3パターン作成してください。",
+                "",
+                "【選定の絶対ルール】",
+                "1. **「引き」と「寄り」を混ぜる**: 4枚すべてが同じ距離感（全部アップ、全部風景など）にならないようにすること。広角、標準、接写をリズミカルに組み合わせる。",
+                "2. **色彩の統一**: 4枚全体でトーン（青み、温かみ、彩度）が調和していること。",
+                "3. **重複の禁止**: 全く同じ構図の写真を複数枚入れないこと。",
+                "",
+                "## 作成する3つのパターン",
+                "",
+                "### パターン1: 【Cinematic Sequence】（映画的ストーリー）",
+                "- **特徴**: 映画のワンシーンのような連続性。",
+                "- **構成案**: 「状況説明（広角）」→「核となる被写体」→「手元や視線の先のディテール（接写）」→「余韻（抽象的）」の流れを作る。",
+                "",
+                "### パターン2: 【Color & Light Study】（光と色の共鳴）",
+                "- **特徴**: 「色」や「光」を主役にした抽象的な構成。",
+                "- **構成案**: 被写体が違っても、「同じ青色が含まれている」「同じような夕日が当たっている」「影の形が似ている」写真を集める。",
+                "",
+                "### パターン3: 【Contrast & Rhythm】（対比とリズム）",
+                "- **特徴**: ギャップで魅せる。",
+                "- **構成案**: 「静と動」「光と影」「人工物と自然」「直線と曲線」など、対比的な写真を交互に配置する。",
+                "",
+                "## 出力形式 (JSONのみ)",
                 """[
-                    {"theme": "Visual", "story": "...", "reason": "...", "files": ["file1", "file2", "file3", "file4"]},
-                    {"theme": "Emotional", "story": "...", "reason": "...", "files": ["f1", "f2", "f3", "f4"]},
-                    {"theme": "Narrative", "story": "...", "reason": "...", "files": ["f1", "f2", "f3", "f4"]}
+                    {
+                        "theme": "Cinematic Sequence",
+                        "story": "...",
+                        "reason": "...",
+                        "files": ["file1", "file2", "file3", "file4"]
+                    },
+                    {
+                        "theme": "Color & Light Study",
+                        "story": "...",
+                        "reason": "...",
+                        "files": ["f1", "f2", "f3", "f4"]
+                    },
+                    {
+                        "theme": "Contrast & Rhythm",
+                        "story": "...",
+                        "reason": "...",
+                        "files": ["f1", "f2", "f3", "f4"]
+                    }
                 ]"""
             ] + gemini_inputs
             
@@ -222,7 +302,7 @@ if uploaded_files:
             st.divider()
             st.subheader(f"🎉 物語: {st.session_state.target_name}")
             
-            tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
+            tabs = st.tabs(["🎥 Cinematic", "🎨 Color & Light", "⚡ Contrast"])
             patterns = st.session_state.patterns
             paths_map = st.session_state.local_paths
             
@@ -232,9 +312,9 @@ if uploaded_files:
                 
                 with tab:
                     st.write(f"**{pat.get('story')}**")
-                    st.caption(f"理由: {pat.get('reason')}")
+                    st.caption(f"選定理由: {pat.get('reason')}")
                     
-                    # 画像集めロジック (必ず4枚集める)
+                    # --- 画像集めロジック (必ず4枚集める) ---
                     final_files = []
                     
                     # 1. 核となる写真
@@ -251,7 +331,7 @@ if uploaded_files:
                                 final_files.append(local_path)
                                 break
                     
-                    # 3. 不足分を補充
+                    # 3. 不足分を補充 (意地でも4枚にする)
                     if len(final_files) < 4:
                         all_vals = list(paths_map.values())
                         remain = [p for p in all_vals if p not in final_files]
@@ -260,16 +340,32 @@ if uploaded_files:
                     
                     show_files = final_files[:4]
                     
-                    # --- シンプルな標準表示 ---
-                    st.markdown("#### 🖼️ 選択された4枚")
+                    # --- X風 2x2 グリッド ---
+                    if len(show_files) == 4:
+                        st.markdown("#### 📱 プレビュー (2x2)")
+                        b64s = [img_to_base64(p) for p in show_files]
+                        grid_html = f"""
+                        <div class="twitter-grid">
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[0]}"></div>
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[1]}"></div>
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[2]}"></div>
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[3]}"></div>
+                        </div>
+                        """
+                        st.markdown(grid_html, unsafe_allow_html=True)
+                    
+                    st.divider()
+                    
+                    # --- 全体表示 ---
+                    st.markdown("#### 🖼️ 全体表示")
                     cols = st.columns(4)
                     for idx, p in enumerate(show_files):
                         cols[idx].image(p, use_container_width=True)
                         
-                    # ダウンロード
+                    # --- ダウンロード ---
                     st.divider()
                     dl_cols = st.columns(2)
-                    txt = f"テーマ: {pat.get('theme')}\nストーリー: {pat.get('story')}"
+                    txt = f"テーマ: {pat.get('theme')}\nストーリー: {pat.get('story')}\n理由: {pat.get('reason')}"
                     uid = st.session_state.gen_id
                     
                     # オリジナル
