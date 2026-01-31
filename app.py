@@ -9,6 +9,7 @@ import zipfile
 import io
 import random
 import tempfile
+import uuid # 毎回違うIDを作るための機能
 
 # --- ページ設定 ---
 st.set_page_config(
@@ -38,8 +39,8 @@ if 'patterns' not in st.session_state:
     st.session_state.patterns = None
 if 'target_name' not in st.session_state:
     st.session_state.target_name = None
-if 'generated_mode' not in st.session_state:
-    st.session_state.generated_mode = None # "manual" or "random"
+if 'gen_id' not in st.session_state:
+    st.session_state.gen_id = str(uuid.uuid4()) # 初回の整理番号
 
 # --- タイトル ---
 st.title("📸 AI Photo Story Curator")
@@ -60,7 +61,6 @@ uploaded_files = st.file_uploader(
     type=['jpg', 'jpeg', 'png', 'heic', 'webp']
 )
 
-# --- 関数: 名前からファイルオブジェクトを取得 ---
 def get_file_by_name(name, file_list):
     for f in file_list:
         if f.name == name:
@@ -83,7 +83,6 @@ if uploaded_files:
         img.thumbnail((150, 150))
         preview_imgs.append(img)
 
-    # ギャラリー表示
     selected_index = image_select(
         label="",
         images=preview_imgs,
@@ -103,24 +102,23 @@ if uploaded_files:
     selected_target = None
     is_random = False
 
-    # ボタン処理
+    # ★ここが重要：結果を表示するための「空の箱」を用意しておく★
+    result_area = st.empty()
+
     with col1:
         if st.button(f"🚀 選択した写真で作る\n({manual_target_file.name})", type="primary"):
             selected_target = manual_target_file
             start_generation = True
             is_random = False
-            # ★重要★ 新しい生成を始めるときは、古い結果を消す
-            st.session_state.patterns = None
-            st.session_state.target_name = None
+            # 古い結果を画面から消す（データは消さずに、見た目だけクリア）
+            result_area.empty()
 
     with col2:
         if st.button("🎲 おまかせ (ランダム) で作る"):
             selected_target = random.choice(uploaded_files)
             start_generation = True
             is_random = True
-            # ★重要★ 新しい生成を始めるときは、古い結果を消す
-            st.session_state.patterns = None
-            st.session_state.target_name = None
+            result_area.empty()
 
     # --- 生成ロジック ---
     if start_generation and selected_target:
@@ -131,15 +129,14 @@ if uploaded_files:
             st.error("⚠️ 左のサイドバーでAPIキーを入力してください")
             st.stop()
 
-        # UI表示：ランダムの場合は何を引いたか大きく表示
         if is_random:
-            st.info(f"🎲 おまかせ抽選の結果... 選ばれたのは **{target_name}** でした！")
-            selected_target.seek(0)
-            st.image(selected_target, width=300, caption="AIが選んだ運命の1枚")
+            st.info(f"🎲 おまかせ抽選の結果... **{target_name}** が選ばれました！")
         else:
             st.success(f"✅ 選択された写真: **{target_name}**")
 
         genai.configure(api_key=api_key)
+        
+        # ステータス表示
         status_text = st.empty()
         progress_bar = st.progress(0)
 
@@ -173,7 +170,6 @@ if uploaded_files:
                     progress_bar.progress(progress)
                     
                     file_obj.seek(0)
-                    
                     temp_path = os.path.join(temp_dir, file_obj.name)
                     img = Image.open(file_obj)
                     img.thumbnail((1024, 1024))
@@ -229,7 +225,10 @@ if uploaded_files:
                 
                 try:
                     clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
-                    # ★成功したらここでセッションを更新★
+                    
+                    # ★ここで新しい整理番号を発行して、DLボタンが被らないようにする★
+                    st.session_state.gen_id = str(uuid.uuid4())
+                    
                     st.session_state.patterns = json.loads(clean_json)
                     st.session_state.target_name = target_name
                 except:
@@ -242,91 +241,93 @@ if uploaded_files:
         except Exception as e:
             st.error(f"エラー: {e}")
 
-    # --- 4. 結果表示エリア ---
+
+    # --- 4. 結果表示エリア（result_areaの中に描画する） ---
     if st.session_state.patterns:
-        
-        st.divider()
-        st.subheader(f"🎉 「{st.session_state.target_name}」から生まれた物語")
-        
-        patterns = st.session_state.patterns
-        tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
-        
-        for i, tab in enumerate(tabs):
-            if i < len(patterns):
-                pat = patterns[i]
-                with tab:
-                    st.markdown(f"**{pat.get('story')}**")
-                    st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
-                    
-                    target_files = []
-                    # 核となる写真（セッションに保存された名前から取得）
-                    seed_obj = get_file_by_name(st.session_state.target_name, uploaded_files)
-                    
-                    chosen_names = pat.get('files', [])
-                    for name in chosen_names:
-                        found = False
-                        for up_file in uploaded_files:
-                            if name in up_file.name or up_file.name in name:
-                                if up_file.name != st.session_state.target_name: 
-                                    target_files.append(up_file)
-                                    found = True
-                                    break
-                    
-                    if seed_obj:
-                        target_files.insert(0, seed_obj)
-                    
-                    target_files = target_files[:4]
+        with result_area.container(): # ★このコンテナの中に表示することで、制御しやすくする
+            st.divider()
+            st.subheader(f"🎉 「{st.session_state.target_name}」から生まれた物語")
+            
+            patterns = st.session_state.patterns
+            tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
+            
+            # 毎回変わるユニークなIDを使ってボタンを作る
+            unique_id = st.session_state.gen_id
 
-                    # プレビュー
-                    cols = st.columns(4)
-                    for idx, f_obj in enumerate(target_files):
-                        f_obj.seek(0)
-                        img_prev = Image.open(f_obj)
-                        img_prev.thumbnail((800, 800))
-                        cols[idx].image(img_prev, use_container_width=True)
-
-                    # ダウンロード
-                    st.markdown("#### 📥 ダウンロード")
-                    col_dl1, col_dl2 = st.columns(2)
-                    text_content = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
-
-                    if target_files:
-                        # 1. オリジナル
-                        buf_orig = io.BytesIO()
-                        with zipfile.ZipFile(buf_orig, "w") as z:
-                            for f_obj in target_files:
-                                f_obj.seek(0)
-                                z.writestr(f_obj.name, f_obj.read())
-                            z.writestr("story.txt", text_content)
+            for i, tab in enumerate(tabs):
+                if i < len(patterns):
+                    pat = patterns[i]
+                    with tab:
+                        st.markdown(f"**{pat.get('story')}**")
+                        st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
                         
-                        col_dl1.download_button(
-                            f"📦 オリジナル画質\n(元サイズ)",
-                            data=buf_orig.getvalue(),
-                            file_name=f"orig_plan_{i+1}.zip",
-                            mime="application/zip",
-                            key=f"dl_orig_{i}_{st.session_state.target_name}"
-                        )
+                        target_files = []
+                        seed_obj = get_file_by_name(st.session_state.target_name, uploaded_files)
+                        chosen_names = pat.get('files', [])
+                        
+                        for name in chosen_names:
+                            for up_file in uploaded_files:
+                                if name in up_file.name or up_file.name in name:
+                                    if up_file.name != st.session_state.target_name: 
+                                        target_files.append(up_file)
+                                        break
+                        
+                        if seed_obj: target_files.insert(0, seed_obj)
+                        target_files = target_files[:4]
 
-                        # 2. SNS用
-                        buf_sns = io.BytesIO()
-                        with zipfile.ZipFile(buf_sns, "w") as z:
-                            for f_obj in target_files:
-                                f_obj.seek(0)
-                                img = Image.open(f_obj)
-                                img.thumbnail((2048, 2048))
-                                img_byte_arr = io.BytesIO()
-                                if img.mode != "RGB": img = img.convert("RGB")
-                                img.save(img_byte_arr, format='JPEG', quality=90)
-                                z.writestr(f_obj.name, img_byte_arr.getvalue())
-                            z.writestr("story.txt", text_content)
+                        cols = st.columns(4)
+                        for idx, f_obj in enumerate(target_files):
+                            f_obj.seek(0)
+                            img_prev = Image.open(f_obj)
+                            img_prev.thumbnail((800, 800))
+                            cols[idx].image(img_prev, use_container_width=True)
 
-                        col_dl2.download_button(
-                            f"📱 SNS用サイズ\n(軽量版)",
-                            data=buf_sns.getvalue(),
-                            file_name=f"sns_plan_{i+1}.zip",
-                            mime="application/zip",
-                            type="primary",
-                            key=f"dl_sns_{i}_{st.session_state.target_name}"
-                        )
+                        # ダウンロード
+                        st.markdown("#### 📥 ダウンロード")
+                        col_dl1, col_dl2 = st.columns(2)
+                        text_content = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
+
+                        if target_files:
+                            # 1. オリジナル
+                            buf_orig = io.BytesIO()
+                            with zipfile.ZipFile(buf_orig, "w") as z:
+                                for f_obj in target_files:
+                                    f_obj.seek(0)
+                                    z.writestr(f_obj.name, f_obj.read())
+                                z.writestr("story.txt", text_content)
+                            
+                            col_dl1.download_button(
+                                f"📦 オリジナル画質\n(元サイズ)",
+                                data=buf_orig.getvalue(),
+                                file_name=f"orig_plan_{i+1}.zip",
+                                mime="application/zip",
+                                # ★キーにunique_idを含めることで、ボタンの衝突を防ぐ
+                                key=f"dl_orig_{i}_{unique_id}"
+                            )
+
+                            # 2. SNS用
+                            buf_sns = io.BytesIO()
+                            with zipfile.ZipFile(buf_sns, "w") as z:
+                                for f_obj in target_files:
+                                    f_obj.seek(0)
+                                    img = Image.open(f_obj)
+                                    img.thumbnail((2048, 2048))
+                                    img_byte_arr = io.BytesIO()
+                                    if img.mode != "RGB": img = img.convert("RGB")
+                                    img.save(img_byte_arr, format='JPEG', quality=90)
+                                    z.writestr(f_obj.name, img_byte_arr.getvalue())
+                                z.writestr("story.txt", text_content)
+
+                            col_dl2.download_button(
+                                f"📱 SNS用サイズ\n(軽量版)",
+                                data=buf_sns.getvalue(),
+                                file_name=f"sns_plan_{i+1}.zip",
+                                mime="application/zip",
+                                type="primary",
+                                # ★キーにunique_idを含めることで、ボタンの衝突を防ぐ
+                                key=f"dl_sns_{i}_{unique_id}"
+                            )
+
 else:
     st.info("👆 上のボックスに写真をドラッグ＆ドロップしてください")
+    
