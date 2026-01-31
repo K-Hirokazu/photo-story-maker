@@ -19,16 +19,16 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 画像をbase64に変換する関数 ---
+# --- 画像をbase64（文字列）に変換する関数 ---
 def img_to_base64(img_path):
     with open(img_path, "rb") as f:
         data = f.read()
     return base64.b64encode(data).decode()
 
-# --- カスタムCSS ---
+# --- カスタムCSS（見た目の調整） ---
 st.markdown("""
 <style>
-    /* ボタンのスタイル */
+    /* ボタンデザイン */
     .stButton>button {
         width: 100%;
         border-radius: 20px;
@@ -40,52 +40,53 @@ st.markdown("""
         min_height: 3em;
     }
 
-    /* --- X風2x2グリッドのスタイル --- */
+    /* --- X（Twitter）風 2x2グリッド --- */
     .twitter-grid {
         display: grid;
-        grid-template-columns: 1fr 1fr; /* 横2列 */
-        grid-template-rows: 1fr 1fr;    /* 縦2行 */
-        gap: 2px;                       /* 画像間の隙間 */
-        aspect-ratio: 16 / 9;           /* 全体のアスペクト比 */
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 2px;
         width: 100%;
-        max-width: 600px;               /* PCでの最大幅を制限 */
-        margin: 0 auto;                 /* 中央寄せ */
-        border-radius: 12px;            /* 全体の角丸 */
-        overflow: hidden;               /* 角丸からはみ出た部分を隠す */
+        max-width: 600px; /* PCでも大きくなりすぎないように制限 */
+        margin: 0 auto;   /* 中央寄せ */
+        aspect-ratio: 16 / 9; /* 全体の比率 */
+        border-radius: 12px;
+        overflow: hidden;
     }
     
-    /* 各画像のコンテナ */
-    .grid-item {
-        position: relative;
-        width: 100%;
-        height: 100%;
+    /* スマホ表示の調整 */
+    @media (max-width: 640px) {
+        .twitter-grid {
+            aspect-ratio: 3 / 2; /* スマホでは少し高さを出す */
+            width: 100% !important;
+        }
     }
 
-    /* 画像自体のスタイル（トリミング用） */
+    /* 画像のトリミング設定 */
+    .grid-item {
+        width: 100%;
+        height: 100%;
+        position: relative;
+    }
     .grid-item img {
         width: 100%;
         height: 100%;
-        object-fit: cover; /* 枠に合わせてトリミング */
+        object-fit: cover; /* 枠いっぱいにトリミング */
         display: block;
-    }
-
-    /* --- スマホ向けの調整 --- */
-    @media (max-width: 640px) {
-        .twitter-grid {
-            aspect-ratio: 1 / 1; /* スマホでは少し縦長（正方形）気味に */
-            max-width: 100%;     /* 画面幅いっぱい */
-        }
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- セッション状態の初期化 ---
+# --- セッション状態の管理 ---
 if 'patterns' not in st.session_state:
     st.session_state.patterns = None
 if 'target_name' not in st.session_state:
     st.session_state.target_name = None
 if 'gen_id' not in st.session_state:
     st.session_state.gen_id = str(uuid.uuid4())
+if 'local_paths' not in st.session_state:
+    st.session_state.local_paths = {}
+# 一時ディレクトリをセッションで保持する（消えないように）
 if 'temp_dir_obj' not in st.session_state:
     st.session_state.temp_dir_obj = None
 
@@ -177,7 +178,6 @@ if uploaded_files:
         if is_random:
             st.info(f"🎲 おまかせ抽選の結果... **{target_name}** が選ばれました！")
             selected_target.seek(0)
-            # ここもサイズ調整
             st.image(selected_target, width=300, caption="運命の1枚")
         else:
             st.success(f"✅ 選択された写真: **{target_name}**")
@@ -189,23 +189,21 @@ if uploaded_files:
 
         try:
             status_text.text("🔑 AIモデルに接続中...")
-            model_name = None
+            # モデル診断
+            model_name = 'gemini-1.5-flash' # デフォルト
             try:
                 available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                 if any('gemini-1.5-flash' in m for m in available): model_name = 'gemini-1.5-flash'
                 elif any('gemini-1.5-pro' in m for m in available): model_name = 'gemini-1.5-pro'
-                elif available: model_name = available[0].replace('models/', '')
             except: pass
             
-            if not model_name:
-                st.error("AIモデルが見つかりません。")
-                st.stop()
-
-            # 一時ディレクトリを作成し、セッションで保持
+            # ディレクトリ管理
             if st.session_state.temp_dir_obj:
-                st.session_state.temp_dir_obj.cleanup() # 前のを掃除
+                st.session_state.temp_dir_obj.cleanup()
             st.session_state.temp_dir_obj = tempfile.TemporaryDirectory()
             temp_dir = st.session_state.temp_dir_obj.name
+            
+            st.session_state.local_paths = {} # パス辞書リセット
 
             status_text.text(f"📤 写真を解析中... (Core: {target_name})")
             
@@ -217,28 +215,27 @@ if uploaded_files:
             gemini_files = []
             total = len(target_files)
             
-            # 画像パスを保存する辞書（後で表示・DLに使う）
-            st.session_state.local_paths = {}
-
+            # --- 画像処理ループ ---
             for i, file_obj in enumerate(target_files):
                 progress = (i / total) * 0.5
                 progress_bar.progress(progress)
                 
                 file_obj.seek(0)
                 
-                # オリジナルを保存（表示・DL用）
+                # 1. オリジナル保存（表示・DL用）
                 orig_path = os.path.join(temp_dir, file_obj.name)
                 with open(orig_path, "wb") as f:
                     f.write(file_obj.read())
                 st.session_state.local_paths[file_obj.name] = orig_path
 
-                # AI用リサイズ
+                # 2. AI用リサイズ
                 resized_path = os.path.join(temp_dir, f"resized_{file_obj.name}")
                 img = Image.open(orig_path)
                 img.thumbnail((1024, 1024))
                 if img.mode != "RGB": img = img.convert("RGB")
                 img.save(resized_path, "JPEG")
                 
+                # 3. アップロード
                 g_file = genai.upload_file(resized_path, mime_type="image/jpeg")
                 gemini_files.append(g_file)
                 gemini_files.append(f"↑ ファイル名: {file_obj.name}")
@@ -269,35 +266,34 @@ if uploaded_files:
                         "files": ["file1", "file2", "file3", "file4"],
                         "story": "解説(100字)",
                         "reason": "理由"
-                        },
-                        {
-                            "id": 3,
-                            "theme": "Narrative Story",
-                            "files": ["file1", "file2", "file3", "file4"],
-                            "story": "解説(100字)",
-                            "reason": "理由"
-                        }
-                    ]
-                    """,
-                    "\n--- 写真リスト ---"
+                    },
+                    {
+                        "id": 3,
+                        "theme": "Narrative Story",
+                        "files": ["file1", "file2", "file3", "file4"],
+                        "story": "解説(100字)",
+                        "reason": "理由"
+                    }
                 ]
-                prompt.extend(gemini_files)
+                """,
+                "\n--- 写真リスト ---"
+            ]
+            prompt.extend(gemini_files)
 
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                
-                try:
-                    clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
-                    
-                    st.session_state.gen_id = str(uuid.uuid4())
-                    st.session_state.patterns = json.loads(clean_json)
-                    st.session_state.target_name = target_name
-                except:
-                    st.error("AIの応答エラー。もう一度試してください。")
-                    st.stop()
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            
+            try:
+                clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
+                st.session_state.gen_id = str(uuid.uuid4())
+                st.session_state.patterns = json.loads(clean_json)
+                st.session_state.target_name = target_name
+            except:
+                st.error("AIの応答エラー。もう一度試してください。")
+                st.stop()
 
-                progress_bar.progress(1.0)
-                status_text.empty()
+            progress_bar.progress(1.0)
+            status_text.empty()
 
         except Exception as e:
             st.error(f"エラー: {e}")
@@ -311,7 +307,6 @@ if uploaded_files:
             
             patterns = st.session_state.patterns
             tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
-            
             unique_id = st.session_state.gen_id
             local_paths = st.session_state.local_paths
 
@@ -322,12 +317,11 @@ if uploaded_files:
                         st.markdown(f"**{pat.get('story')}**")
                         st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
                         
-                        # 画像パスの特定
+                        # パス解決
                         target_paths = []
                         seed_path = local_paths.get(st.session_state.target_name)
                         
-                        chosen_names = pat.get('files', [])
-                        for name in chosen_names:
+                        for name in pat.get('files', []):
                             for fname, fpath in local_paths.items():
                                 if name in fname or fname in name:
                                     if fname != st.session_state.target_name:
@@ -337,11 +331,9 @@ if uploaded_files:
                         if seed_path: target_paths.insert(0, seed_path)
                         target_paths = target_paths[:4]
 
+                        # --- ★ X風 2x2 グリッド表示 ---
                         if len(target_paths) == 4:
-                            # --- ★新機能：X風 2x2グリッド表示 (HTML+CSS) ---
                             st.markdown("#### 📱 プレビュー (2x2)")
-                            
-                            # 画像をbase64化してHTMLに埋め込む
                             b64_imgs = [img_to_base64(p) for p in target_paths]
                             
                             html_grid = f"""
@@ -353,18 +345,18 @@ if uploaded_files:
                             </div>
                             """
                             st.markdown(html_grid, unsafe_allow_html=True)
-
+                        
                         st.divider()
 
-                        # --- 従来の全体表示 ---
+                        # --- 従来の一覧表示（サイズ調整済み） ---
                         st.markdown("#### 🖼️ 全体表示")
                         cols = st.columns(4)
                         for idx, fpath in enumerate(target_paths):
                             img_prev = Image.open(fpath)
-                            # ここもサイズ調整：PCで大きすぎないようにwidthを指定
+                            # use_container_width=True でスマホ対応、PCでは自動調整
                             cols[idx].image(img_prev, use_container_width=True)
 
-                        # ダウンロード
+                        # --- ダウンロード ---
                         st.divider()
                         st.markdown("#### 📥 ダウンロード")
                         col_dl1, col_dl2 = st.columns(2)
@@ -381,7 +373,7 @@ if uploaded_files:
                             col_dl1.download_button(
                                 f"📦 オリジナル画質\n(元サイズ)",
                                 data=buf_orig.getvalue(),
-                                file_name=f"orig_plan_{i+1}.zip",
+                                file_name=f"orig_{i+1}.zip",
                                 mime="application/zip",
                                 key=f"dl_orig_{i}_{unique_id}"
                             )
@@ -401,11 +393,10 @@ if uploaded_files:
                             col_dl2.download_button(
                                 f"📱 SNS用サイズ\n(軽量版)",
                                 data=buf_sns.getvalue(),
-                                file_name=f"sns_plan_{i+1}.zip",
+                                file_name=f"sns_{i+1}.zip",
                                 mime="application/zip",
                                 type="primary",
                                 key=f"dl_sns_{i}_{unique_id}"
                             )
-
 else:
     st.info("👆 上のボックスに写真をドラッグ＆ドロップしてください")
