@@ -10,6 +10,7 @@ import io
 import random
 import tempfile
 import uuid
+import base64
 
 # --- ページ設定 ---
 st.set_page_config(
@@ -18,9 +19,16 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- 画像をbase64に変換する関数 ---
+def img_to_base64(img_path):
+    with open(img_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
 # --- カスタムCSS ---
 st.markdown("""
 <style>
+    /* ボタンのスタイル */
     .stButton>button {
         width: 100%;
         border-radius: 20px;
@@ -31,9 +39,42 @@ st.markdown("""
         height: auto;
         min_height: 3em;
     }
-    /* スマホでの2x2グリッドの隙間調整 */
-    [data-testid="stVerticalBlock"] > [style*="flex-direction: row"] > [data-testid="column"] {
-        padding: 0 4px !important;
+
+    /* --- X風2x2グリッドのスタイル --- */
+    .twitter-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr; /* 横2列 */
+        grid-template-rows: 1fr 1fr;    /* 縦2行 */
+        gap: 2px;                       /* 画像間の隙間 */
+        aspect-ratio: 16 / 9;           /* 全体のアスペクト比 */
+        width: 100%;
+        max-width: 600px;               /* PCでの最大幅を制限 */
+        margin: 0 auto;                 /* 中央寄せ */
+        border-radius: 12px;            /* 全体の角丸 */
+        overflow: hidden;               /* 角丸からはみ出た部分を隠す */
+    }
+    
+    /* 各画像のコンテナ */
+    .grid-item {
+        position: relative;
+        width: 100%;
+        height: 100%;
+    }
+
+    /* 画像自体のスタイル（トリミング用） */
+    .grid-item img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover; /* 枠に合わせてトリミング */
+        display: block;
+    }
+
+    /* --- スマホ向けの調整 --- */
+    @media (max-width: 640px) {
+        .twitter-grid {
+            aspect-ratio: 1 / 1; /* スマホでは少し縦長（正方形）気味に */
+            max-width: 100%;     /* 画面幅いっぱい */
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -45,6 +86,8 @@ if 'target_name' not in st.session_state:
     st.session_state.target_name = None
 if 'gen_id' not in st.session_state:
     st.session_state.gen_id = str(uuid.uuid4())
+if 'temp_dir_obj' not in st.session_state:
+    st.session_state.temp_dir_obj = None
 
 # --- タイトル ---
 st.title("📸 AI Photo Story Curator")
@@ -133,8 +176,8 @@ if uploaded_files:
 
         if is_random:
             st.info(f"🎲 おまかせ抽選の結果... **{target_name}** が選ばれました！")
-            # ★ここに追加：選ばれた写真を表示★
             selected_target.seek(0)
+            # ここもサイズ調整
             st.image(selected_target, width=300, caption="運命の1枚")
         else:
             st.success(f"✅ 選択された写真: **{target_name}**")
@@ -158,58 +201,74 @@ if uploaded_files:
                 st.error("AIモデルが見つかりません。")
                 st.stop()
 
-            with tempfile.TemporaryDirectory() as temp_dir:
-                status_text.text(f"📤 写真を解析中... (Core: {target_name})")
-                
-                seed_file = selected_target
-                other_files = [f for f in uploaded_files if f.name != target_name]
-                random.shuffle(other_files)
-                target_files = [seed_file] + other_files[:24]
-                
-                gemini_files = []
-                total = len(target_files)
-                
-                for i, file_obj in enumerate(target_files):
-                    progress = (i / total) * 0.5
-                    progress_bar.progress(progress)
-                    
-                    file_obj.seek(0)
-                    temp_path = os.path.join(temp_dir, file_obj.name)
-                    img = Image.open(file_obj)
-                    img.thumbnail((1024, 1024))
-                    if img.mode != "RGB": img = img.convert("RGB")
-                    img.save(temp_path, "JPEG")
-                    
-                    g_file = genai.upload_file(temp_path, mime_type="image/jpeg")
-                    gemini_files.append(g_file)
-                    gemini_files.append(f"↑ ファイル名: {file_obj.name}")
+            # 一時ディレクトリを作成し、セッションで保持
+            if st.session_state.temp_dir_obj:
+                st.session_state.temp_dir_obj.cleanup() # 前のを掃除
+            st.session_state.temp_dir_obj = tempfile.TemporaryDirectory()
+            temp_dir = st.session_state.temp_dir_obj.name
 
-                status_text.text("🧠 AIがストーリーを構想中...")
-                progress_bar.progress(0.7)
+            status_text.text(f"📤 写真を解析中... (Core: {target_name})")
+            
+            seed_file = selected_target
+            other_files = [f for f in uploaded_files if f.name != target_name]
+            random.shuffle(other_files)
+            target_files = [seed_file] + other_files[:24]
+            
+            gemini_files = []
+            total = len(target_files)
+            
+            # 画像パスを保存する辞書（後で表示・DLに使う）
+            st.session_state.local_paths = {}
 
-                prompt = [
-                    f"あなたは写真編集者です。リストから「{target_name}」を核として、異なる視点の『4枚組』を3パターン作成してください。",
-                    "【重要】写真はリストにあるものから選び、ファイル名は正確に記述すること。",
-                    "## 作成パターン",
-                    "1. 【Visual Harmony】: 色彩・構図重視",
-                    "2. 【Emotional Flow】: 感情・空気感重視",
-                    "3. 【Narrative Story】: 物語性重視",
-                    "## 出力形式 (JSONのみ)",
-                    """
-                    [
-                        {
-                            "id": 1,
-                            "theme": "Visual Harmony",
-                            "files": ["file1", "file2", "file3", "file4"],
-                            "story": "解説(100字)",
-                            "reason": "理由"
-                        },
-                        {
-                            "id": 2,
-                            "theme": "Emotional Flow",
-                            "files": ["file1", "file2", "file3", "file4"],
-                            "story": "解説(100字)",
-                            "reason": "理由"
+            for i, file_obj in enumerate(target_files):
+                progress = (i / total) * 0.5
+                progress_bar.progress(progress)
+                
+                file_obj.seek(0)
+                
+                # オリジナルを保存（表示・DL用）
+                orig_path = os.path.join(temp_dir, file_obj.name)
+                with open(orig_path, "wb") as f:
+                    f.write(file_obj.read())
+                st.session_state.local_paths[file_obj.name] = orig_path
+
+                # AI用リサイズ
+                resized_path = os.path.join(temp_dir, f"resized_{file_obj.name}")
+                img = Image.open(orig_path)
+                img.thumbnail((1024, 1024))
+                if img.mode != "RGB": img = img.convert("RGB")
+                img.save(resized_path, "JPEG")
+                
+                g_file = genai.upload_file(resized_path, mime_type="image/jpeg")
+                gemini_files.append(g_file)
+                gemini_files.append(f"↑ ファイル名: {file_obj.name}")
+
+            status_text.text("🧠 AIがストーリーを構想中...")
+            progress_bar.progress(0.7)
+
+            prompt = [
+                f"あなたは写真編集者です。リストから「{target_name}」を核として、異なる視点の『4枚組』を3パターン作成してください。",
+                "【重要】写真はリストにあるものから選び、ファイル名は正確に記述すること。",
+                "## 作成パターン",
+                "1. 【Visual Harmony】: 色彩・構図重視",
+                "2. 【Emotional Flow】: 感情・空気感重視",
+                "3. 【Narrative Story】: 物語性重視",
+                "## 出力形式 (JSONのみ)",
+                """
+                [
+                    {
+                        "id": 1,
+                        "theme": "Visual Harmony",
+                        "files": ["file1", "file2", "file3", "file4"],
+                        "story": "解説(100字)",
+                        "reason": "理由"
+                    },
+                    {
+                        "id": 2,
+                        "theme": "Emotional Flow",
+                        "files": ["file1", "file2", "file3", "file4"],
+                        "story": "解説(100字)",
+                        "reason": "理由"
                         },
                         {
                             "id": 3,
@@ -231,7 +290,6 @@ if uploaded_files:
                     clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
                     
                     st.session_state.gen_id = str(uuid.uuid4())
-                    
                     st.session_state.patterns = json.loads(clean_json)
                     st.session_state.target_name = target_name
                 except:
@@ -246,7 +304,7 @@ if uploaded_files:
 
 
     # --- 4. 結果表示エリア ---
-    if st.session_state.patterns:
+    if st.session_state.patterns and st.session_state.local_paths:
         with result_area.container():
             st.divider()
             st.subheader(f"🎉 「{st.session_state.target_name}」から生まれた物語")
@@ -255,6 +313,7 @@ if uploaded_files:
             tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
             
             unique_id = st.session_state.gen_id
+            local_paths = st.session_state.local_paths
 
             for i, tab in enumerate(tabs):
                 if i < len(patterns):
@@ -263,53 +322,46 @@ if uploaded_files:
                         st.markdown(f"**{pat.get('story')}**")
                         st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
                         
-                        target_files = []
-                        seed_obj = get_file_by_name(st.session_state.target_name, uploaded_files)
-                        chosen_names = pat.get('files', [])
+                        # 画像パスの特定
+                        target_paths = []
+                        seed_path = local_paths.get(st.session_state.target_name)
                         
+                        chosen_names = pat.get('files', [])
                         for name in chosen_names:
-                            for up_file in uploaded_files:
-                                if name in up_file.name or up_file.name in name:
-                                    if up_file.name != st.session_state.target_name: 
-                                        target_files.append(up_file)
+                            for fname, fpath in local_paths.items():
+                                if name in fname or fname in name:
+                                    if fname != st.session_state.target_name:
+                                        target_paths.append(fpath)
                                         break
                         
-                        if seed_obj: target_files.insert(0, seed_obj)
-                        target_files = target_files[:4]
+                        if seed_path: target_paths.insert(0, seed_path)
+                        target_paths = target_paths[:4]
 
-                        if len(target_files) == 4:
-                            # --- ★ここから新機能：スマホ用2x2グリッド表示 ---
+                        if len(target_paths) == 4:
+                            # --- ★新機能：X風 2x2グリッド表示 (HTML+CSS) ---
                             st.markdown("#### 📱 プレビュー (2x2)")
-                            st.caption("※スマホで見やすい配置です。多少トリミングされます。")
                             
-                            # 上の段 (左:0, 右:1)
-                            row1_col1, row1_col2 = st.columns(2)
-                            with row1_col1:
-                                target_files[0].seek(0)
-                                st.image(Image.open(target_files[0]), use_container_width=True)
-                            with row1_col2:
-                                target_files[1].seek(0)
-                                st.image(Image.open(target_files[1]), use_container_width=True)
+                            # 画像をbase64化してHTMLに埋め込む
+                            b64_imgs = [img_to_base64(p) for p in target_paths]
                             
-                            # 下の段 (左:2, 右:3)
-                            row2_col1, row2_col2 = st.columns(2)
-                            with row2_col1:
-                                target_files[2].seek(0)
-                                st.image(Image.open(target_files[2]), use_container_width=True)
-                            with row2_col2:
-                                target_files[3].seek(0)
-                                st.image(Image.open(target_files[3]), use_container_width=True)
+                            html_grid = f"""
+                            <div class="twitter-grid">
+                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[0]}"></div>
+                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[1]}"></div>
+                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[2]}"></div>
+                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[3]}"></div>
+                            </div>
+                            """
+                            st.markdown(html_grid, unsafe_allow_html=True)
 
                         st.divider()
 
-                        # --- 従来の全体表示 (スマホだと縦1列) ---
-                        st.markdown("#### 🖼️ 全体表示 (縦並び)")
-                        st.caption("※写真の全体像です。")
+                        # --- 従来の全体表示 ---
+                        st.markdown("#### 🖼️ 全体表示")
                         cols = st.columns(4)
-                        for idx, f_obj in enumerate(target_files):
-                            f_obj.seek(0)
-                            img_prev = Image.open(f_obj)
-                            img_prev.thumbnail((800, 800))
+                        for idx, fpath in enumerate(target_paths):
+                            img_prev = Image.open(fpath)
+                            # ここもサイズ調整：PCで大きすぎないようにwidthを指定
                             cols[idx].image(img_prev, use_container_width=True)
 
                         # ダウンロード
@@ -318,13 +370,12 @@ if uploaded_files:
                         col_dl1, col_dl2 = st.columns(2)
                         text_content = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
 
-                        if target_files:
+                        if target_paths:
                             # 1. オリジナル
                             buf_orig = io.BytesIO()
                             with zipfile.ZipFile(buf_orig, "w") as z:
-                                for f_obj in target_files:
-                                    f_obj.seek(0)
-                                    z.writestr(f_obj.name, f_obj.read())
+                                for fpath in target_paths:
+                                    z.write(fpath, os.path.basename(fpath))
                                 z.writestr("story.txt", text_content)
                             
                             col_dl1.download_button(
@@ -338,14 +389,13 @@ if uploaded_files:
                             # 2. SNS用
                             buf_sns = io.BytesIO()
                             with zipfile.ZipFile(buf_sns, "w") as z:
-                                for f_obj in target_files:
-                                    f_obj.seek(0)
-                                    img = Image.open(f_obj)
+                                for fpath in target_paths:
+                                    img = Image.open(fpath)
                                     img.thumbnail((2048, 2048))
                                     img_byte_arr = io.BytesIO()
                                     if img.mode != "RGB": img = img.convert("RGB")
                                     img.save(img_byte_arr, format='JPEG', quality=90)
-                                    z.writestr(f_obj.name, img_byte_arr.getvalue())
+                                    z.writestr(os.path.basename(fpath), img_byte_arr.getvalue())
                                 z.writestr("story.txt", text_content)
 
                             col_dl2.download_button(
