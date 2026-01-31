@@ -19,51 +19,9 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 画像をbase64に変換する関数 ---
-def img_to_base64(img_path):
-    try:
-        with open(img_path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
-    except Exception:
-        return ""
-
-# --- 頑丈なモデル選択関数 ---
-def get_best_model():
-    """利用可能なモデルの中からベストなものを自動で探す"""
-    try:
-        all_models = list(genai.list_models())
-        available_names = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
-        
-        priorities = [
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-flash-latest',
-            'models/gemini-1.5-flash-001',
-            'models/gemini-1.5-pro',
-            'models/gemini-1.5-pro-latest',
-            'models/gemini-pro'
-        ]
-        
-        for p in priorities:
-            if p in available_names:
-                return p
-        
-        for name in available_names:
-            if 'flash' in name and '1.5' in name:
-                return name
-        
-        if available_names:
-            return available_names[0]
-            
-    except Exception:
-        pass
-    
-    return 'gemini-1.5-flash'
-
-# --- カスタムCSS ---
+# --- カスタムCSS（X風グリッドとボタン） ---
 st.markdown("""
 <style>
-    /* ボタンデザイン */
     .stButton>button {
         width: 100%;
         border-radius: 20px;
@@ -74,8 +32,7 @@ st.markdown("""
         height: auto;
         min_height: 3em;
     }
-
-    /* --- X（Twitter）風 2x2グリッド --- */
+    /* X風 2x2グリッド */
     .twitter-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -88,19 +45,15 @@ st.markdown("""
         border-radius: 12px;
         overflow: hidden;
     }
-    
     @media (max-width: 640px) {
         .twitter-grid {
-            aspect-ratio: 3 / 2;
-            width: 100% !important;
+            aspect-ratio: 3 / 2; /* スマホ用比率 */
         }
     }
-
     .grid-item {
         width: 100%;
         height: 100%;
         position: relative;
-        background-color: #f0f0f0; /* 画像がない時の背景 */
     }
     .grid-item img {
         width: 100%;
@@ -111,338 +64,284 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- セッション状態の初期化 ---
-if 'patterns' not in st.session_state:
-    st.session_state.patterns = None
-if 'target_name' not in st.session_state:
-    st.session_state.target_name = None
-if 'gen_id' not in st.session_state:
-    st.session_state.gen_id = str(uuid.uuid4())
-if 'local_paths' not in st.session_state:
-    st.session_state.local_paths = {}
-if 'temp_dir_obj' not in st.session_state:
-    st.session_state.temp_dir_obj = None
-if 'candidate_files' not in st.session_state: # AIに渡した候補リストを保存
-    st.session_state.candidate_files = []
+# --- 便利な関数 ---
+def img_to_base64(img_path):
+    try:
+        with open(img_path, "rb") as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    except:
+        return ""
 
-# --- タイトル ---
+def get_best_model():
+    """使えるモデルを自動で探す"""
+    try:
+        models = genai.list_models()
+        valid_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+        # 優先順位
+        targets = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+        
+        # 1. 部分一致検索
+        for t in targets:
+            for m in valid_models:
+                if t in m: return m
+        # 2. なければリストの最初
+        if valid_models: return valid_models[0]
+    except:
+        pass
+    return "gemini-1.5-flash"
+
+# --- セッション初期化 ---
+if 'patterns' not in st.session_state: st.session_state.patterns = None
+if 'target_name' not in st.session_state: st.session_state.target_name = None
+if 'gen_id' not in st.session_state: st.session_state.gen_id = str(uuid.uuid4())
+if 'local_paths' not in st.session_state: st.session_state.local_paths = {}
+
+# --- アプリ本体 ---
 st.title("📸 AI Photo Story Curator")
-st.caption("アップロードした写真群から、AIが「最高の4枚」を選び出し、物語を紡ぎます。")
+st.caption("アップロードした写真から「最高の4枚」を選び、物語を作ります。")
 
-# --- サイドバー ---
+# サイドバー設定
 with st.sidebar:
     st.header("⚙️ 設定")
-    api_key = st.text_input("Gemini API Key", type="password", help="Google AI Studioで取得したキー")
-    st.markdown("[🔑 APIキー取得](https://aistudio.google.com/app/apikey)")
-    st.divider()
-    st.info("💡 写真を一度アップロードすれば、何度でも生成できます。")
-
-# --- メインエリア：アップロード ---
-uploaded_files = st.file_uploader(
-    "1. 写真をまとめてアップロード (20枚〜100枚推奨)", 
-    accept_multiple_files=True, 
-    type=['jpg', 'jpeg', 'png', 'heic', 'webp']
-)
-
-# --- メイン処理 ---
-if uploaded_files:
-    # --- 2. ギャラリー選択 ---
-    st.markdown("### 2. 「核」となる写真を選ぶ（またはおまかせ）")
+    api_key = st.text_input("Gemini API Key", type="password")
+    st.markdown("[🔑 キー取得](https://aistudio.google.com/app/apikey)")
     
-    preview_imgs = []
-    display_limit = 100 
-    file_names = [f.name for f in uploaded_files[:display_limit]]
+    # 手動モデル選択（自動失敗時用）
+    st.divider()
+    model_option = st.selectbox("AIモデル選択 (自動推奨)", ["Auto", "gemini-1.5-flash", "gemini-1.5-pro"])
 
-    for f in uploaded_files[:display_limit]:
+uploaded_files = st.file_uploader("1. 写真をアップロード", accept_multiple_files=True, type=['jpg','jpeg','png','heic','webp'])
+
+if uploaded_files:
+    # ギャラリー表示
+    st.markdown("### 2. 「核」となる写真を選ぶ")
+    
+    # 最初の100枚だけプレビュー
+    display_files = uploaded_files[:100]
+    preview_imgs = []
+    
+    # 高速化のためサムネイル作成
+    for f in display_files:
         f.seek(0)
         img = Image.open(f)
         img.thumbnail((150, 150))
         preview_imgs.append(img)
-
-    selected_index = image_select(
+    
+    sel_idx = image_select(
         label="",
         images=preview_imgs,
-        captions=file_names,
+        captions=[f.name for f in display_files],
         index=0,
         return_value="index",
         use_container_width=False
     )
     
-    manual_target_file = uploaded_files[selected_index]
-
-    # --- 3. アクションボタン ---
-    st.markdown("### 3. 生成スタート")
-    col1, col2 = st.columns(2)
+    target_file = display_files[sel_idx]
     
-    start_generation = False
-    selected_target = None
+    # ボタンエリア
+    st.markdown("### 3. 生成スタート")
+    c1, c2 = st.columns(2)
+    start = False
     is_random = False
+    
+    res_area = st.empty() # 結果表示エリア
 
-    result_area = st.empty()
-
-    with col1:
-        if st.button(f"🚀 選択した写真で作る\n({manual_target_file.name})", type="primary"):
-            selected_target = manual_target_file
-            start_generation = True
-            is_random = False
-            result_area.empty()
-
-    with col2:
-        if st.button("🎲 おまかせ (ランダム) で作る"):
-            selected_target = random.choice(uploaded_files)
-            start_generation = True
-            is_random = True
-            result_area.empty()
-
-    # --- 生成ロジック ---
-    if start_generation and selected_target:
+    if c1.button(f"🚀 選択した写真で作る\n({target_file.name})", type="primary"):
+        start = True
+        is_random = False
+        res_area.empty()
         
-        target_name = selected_target.name
+    if c2.button("🎲 おまかせ (ランダム)"):
+        target_file = random.choice(uploaded_files)
+        start = True
+        is_random = True
+        res_area.empty()
 
+    # --- 生成処理 ---
+    if start and target_file:
         if not api_key:
-            st.error("⚠️ 左のサイドバーでAPIキーを入力してください")
+            st.error("⚠️ サイドバーでAPIキーを入力してください")
             st.stop()
 
         if is_random:
-            st.info(f"🎲 おまかせ抽選の結果... **{target_name}** が選ばれました！")
-            selected_target.seek(0)
-            st.image(selected_target, width=300, caption="運命の1枚")
+            st.info(f"🎲 運命の1枚: **{target_file.name}**")
+            target_file.seek(0)
+            st.image(target_file, width=300)
         else:
-            st.success(f"✅ 選択された写真: **{target_name}**")
-
+            st.success(f"✅ 選択中: **{target_file.name}**")
+        
         genai.configure(api_key=api_key)
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-
+        status = st.empty()
+        bar = st.progress(0)
+        
         try:
-            status_text.text("🔑 AIモデルに接続中...")
-            target_model_name = get_best_model()
+            status.text("AI準備中...")
             
-            # ディレクトリ管理
-            if st.session_state.temp_dir_obj:
-                st.session_state.temp_dir_obj.cleanup()
-            st.session_state.temp_dir_obj = tempfile.TemporaryDirectory()
-            temp_dir = st.session_state.temp_dir_obj.name
+            # モデル決定
+            use_model = get_best_model() if model_option == "Auto" else model_option
             
-            st.session_state.local_paths = {}
-            st.session_state.candidate_files = [] # 候補リスト初期化
-
-            status_text.text(f"📤 写真を解析中... (Model: {target_model_name})")
-            
-            seed_file = selected_target
-            other_files = [f for f in uploaded_files if f.name != target_name]
-            random.shuffle(other_files)
-            # AIに渡す候補リスト（最大25枚）
-            target_files = [seed_file] + other_files[:24]
-            
-            # 候補リストの名前を保存しておく（補充用）
-            st.session_state.candidate_files = [f.name for f in target_files]
-            
-            gemini_files = []
-            total = len(target_files)
-            
-            for i, file_obj in enumerate(target_files):
-                progress = (i / total) * 0.5
-                progress_bar.progress(progress)
+            # 画像処理 (一時保存)
+            with tempfile.TemporaryDirectory() as td:
+                status.text(f"画像を解析中... ({use_model})")
                 
-                file_obj.seek(0)
+                # パス辞書をリセット
+                st.session_state.local_paths = {}
                 
-                orig_path = os.path.join(temp_dir, file_obj.name)
-                with open(orig_path, "wb") as f:
-                    f.write(file_obj.read())
-                st.session_state.local_paths[file_obj.name] = orig_path
-
-                resized_path = os.path.join(temp_dir, f"resized_{file_obj.name}")
-                img = Image.open(orig_path)
-                img.thumbnail((1024, 1024))
-                if img.mode != "RGB": img = img.convert("RGB")
-                img.save(resized_path, "JPEG")
+                # リスト作成: 核 + ランダム24枚
+                others = [f for f in uploaded_files if f.name != target_file.name]
+                random.shuffle(others)
+                process_files = [target_file] + others[:24]
                 
-                g_file = genai.upload_file(resized_path, mime_type="image/jpeg")
-                gemini_files.append(g_file)
-                gemini_files.append(f"↑ ファイル名: {file_obj.name}")
+                gemini_inputs = []
+                
+                for i, f_obj in enumerate(process_files):
+                    bar.progress((i / len(process_files)) * 0.5)
+                    f_obj.seek(0)
+                    
+                    # 保存
+                    path = os.path.join(td, f_obj.name)
+                    with open(path, "wb") as f: f.write(f_obj.read())
+                    st.session_state.local_paths[f_obj.name] = path # パスを記憶
+                    
+                    # リサイズ＆アップロード
+                    img = Image.open(path)
+                    img.thumbnail((1024, 1024))
+                    if img.mode != 'RGB': img = img.convert('RGB')
+                    
+                    rz_path = os.path.join(td, f"resized_{f_obj.name}.jpg")
+                    img.save(rz_path, "JPEG")
+                    
+                    g_file = genai.upload_file(rz_path, mime_type="image/jpeg")
+                    gemini_inputs.append(g_file)
+                    gemini_inputs.append(f"ファイル名: {f_obj.name}")
 
-            status_text.text("🧠 AIがストーリーを構想中...")
-            progress_bar.progress(0.7)
-
-            prompt = [
-                f"あなたは写真編集者です。リストから「{target_name}」を核として、異なる視点の『4枚組』を3パターン作成してください。",
-                "【重要】写真はリストにあるものから選び、ファイル名は正確に記述すること。",
-                "## 作成パターン",
-                "1. 【Visual Harmony】: 色彩・構図重視",
-                "2. 【Emotional Flow】: 感情・空気感重視",
-                "3. 【Narrative Story】: 物語性重視",
-                "## 出力形式 (JSONのみ)",
-                """
-                [
-                    {
-                        "id": 1,
-                        "theme": "Visual Harmony",
-                        "files": ["file1", "file2", "file3", "file4"],
-                        "story": "解説(100字)",
-                        "reason": "理由"
-                    },
-                    {
-                        "id": 2,
-                        "theme": "Emotional Flow",
-                        "files": ["file1", "file2", "file3", "file4"],
-                        "story": "解説(100字)",
-                        "reason": "理由"
-                    },
-                    {
-                        "id": 3,
-                        "theme": "Narrative Story",
-                        "files": ["file1", "file2", "file3", "file4"],
-                        "story": "解説(100字)",
-                        "reason": "理由"
-                    }
-                ]
-                """,
-                "\n--- 写真リスト ---"
-            ]
-            prompt.extend(gemini_files)
-
-            model = genai.GenerativeModel(target_model_name)
-            response = model.generate_content(prompt)
-            
-            try:
-                clean_json = re.search(r'\[.*\]', response.text, re.DOTALL).group()
+                # AI生成
+                status.text("ストーリー構成中...")
+                bar.progress(0.6)
+                
+                prompt = [
+                    f"あなたは写真編集者です。リストの「{target_file.name}」を核に、4枚組の作品を3パターン作ってください。",
+                    "ファイル名は正確に答えてください。",
+                    "出力は以下のJSON形式のみ:",
+                    """[
+                        {"theme": "Visual", "story": "...", "reason": "...", "files": ["file1", "file2", "file3", "file4"]},
+                        {"theme": "Emotional", "story": "...", "reason": "...", "files": ["f1", "f2", "f3", "f4"]},
+                        {"theme": "Narrative", "story": "...", "reason": "...", "files": ["f1", "f2", "f3", "f4"]}
+                    ]"""
+                ] + gemini_inputs
+                
+                model = genai.GenerativeModel(use_model)
+                res = model.generate_content(prompt)
+                
+                # JSON抽出
+                json_match = re.search(r'\[.*\]', res.text, re.DOTALL)
+                if not json_match: raise Exception("AIの応答解析に失敗")
+                
+                st.session_state.patterns = json.loads(json_match.group())
+                st.session_state.target_name = target_file.name
                 st.session_state.gen_id = str(uuid.uuid4())
-                st.session_state.patterns = json.loads(clean_json)
-                st.session_state.target_name = target_name
-            except:
-                st.error("AIの応答エラー。もう一度試してください。")
-                st.stop()
-
-            progress_bar.progress(1.0)
-            status_text.empty()
-
+                
+                bar.progress(1.0)
+                status.empty()
+                
         except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
+            st.error(f"エラー: {e}")
 
-    # --- 4. 結果表示エリア ---
-    if st.session_state.patterns and st.session_state.local_paths:
-        with result_area.container():
+    # --- 結果表示 ---
+    if st.session_state.patterns:
+        with res_area.container():
             st.divider()
-            st.subheader(f"🎉 「{st.session_state.target_name}」から生まれた物語")
+            st.subheader(f"🎉 物語: {st.session_state.target_name}")
             
-            patterns = st.session_state.patterns
             tabs = st.tabs(["🎨 Visual", "💧 Emotional", "📖 Story"])
-            unique_id = st.session_state.gen_id
-            local_paths = st.session_state.local_paths
-            candidates = st.session_state.candidate_files
-
+            patterns = st.session_state.patterns
+            paths_map = st.session_state.local_paths
+            
             for i, tab in enumerate(tabs):
-                if i < len(patterns):
-                    pat = patterns[i]
-                    with tab:
-                        st.markdown(f"**{pat.get('story')}**")
-                        st.caption(f"テーマ: {pat.get('theme')} | 理由: {pat.get('reason')}")
-                        
-                        # --- パス解決ロジック（強化版）---
-                        target_paths = []
-                        
-                        # 1. 核となる写真を確保
-                        seed_path = local_paths.get(st.session_state.target_name)
-                        if seed_path:
-                            target_paths.append(seed_path)
-                        
-                        # 2. AIが選んだ写真を検索（あいまい検索）
-                        for name in pat.get('files', []):
-                            # すでに4枚あったら終了
-                            if len(target_paths) >= 4:
+                if i >= len(patterns): continue
+                pat = patterns[i]
+                
+                with tab:
+                    st.write(f"**{pat.get('story')}**")
+                    st.caption(f"理由: {pat.get('reason')}")
+                    
+                    # --- 画像集め（ここを強化）---
+                    final_files = []
+                    
+                    # 1. 核となる写真を最初に入れる
+                    seed_path = paths_map.get(st.session_state.target_name)
+                    if seed_path: final_files.append(seed_path)
+                    
+                    # 2. AIが選んだ写真を探す
+                    ai_files = pat.get('files', [])
+                    for name in ai_files:
+                        if len(final_files) >= 4: break
+                        # 名前で検索（大文字小文字無視）
+                        for local_name, local_path in paths_map.items():
+                            if local_path in final_files: continue
+                            if name.lower() in local_name.lower():
+                                final_files.append(local_path)
                                 break
-                                
-                            found_path = None
-                            # 完全一致または部分一致で探す（大文字小文字無視）
-                            for fname, fpath in local_paths.items():
-                                if (name.lower() in fname.lower() or fname.lower() in name.lower()) and fpath not in target_paths:
-                                    found_path = fpath
-                                    break
-                            
-                            if found_path:
-                                target_paths.append(found_path)
+                    
+                    # 3. 足りなければ強制補充（ここが重要）
+                    if len(final_files) < 4:
+                        all_vals = list(paths_map.values())
+                        remain = [p for p in all_vals if p not in final_files]
+                        needed = 4 - len(final_files)
+                        if remain:
+                            final_files.extend(random.sample(remain, min(needed, len(remain))))
+                    
+                    # 表示用リスト (4枚)
+                    show_files = final_files[:4]
+                    
+                    if len(show_files) == 4:
+                        # X風プレビュー
+                        st.markdown("#### 📱 プレビュー (2x2)")
+                        b64s = [img_to_base64(p) for p in show_files]
+                        grid_html = f"""
+                        <div class="twitter-grid">
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[0]}"></div>
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[1]}"></div>
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[2]}"></div>
+                            <div class="grid-item"><img src="data:image/jpeg;base64,{b64s[3]}"></div>
+                        </div>
+                        """
+                        st.markdown(grid_html, unsafe_allow_html=True)
+                    
+                    st.divider()
+                    
+                    # 全体表示
+                    st.markdown("#### 🖼️ 全体表示")
+                    cols = st.columns(4)
+                    for idx, p in enumerate(show_files):
+                        cols[idx].image(p, use_container_width=True)
                         
-                        # 3. 【重要】4枚に満たない場合の補充ロジック
-                        if len(target_paths) < 4:
-                            # 候補リストから、まだ選ばれていない写真を探して補充
-                            remaining = [local_paths[f] for f in candidates if local_paths.get(f) and local_paths[f] not in target_paths]
-                            needed = 4 - len(target_paths)
-                            # ランダムに補充
-                            supplement = random.sample(remaining, min(needed, len(remaining)))
-                            target_paths.extend(supplement)
+                    # ダウンロード
+                    st.divider()
+                    dl_cols = st.columns(2)
+                    txt = f"テーマ: {pat.get('theme')}\nストーリー: {pat.get('story')}"
+                    uid = st.session_state.gen_id
+                    
+                    # オリジナル
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, "w") as z:
+                        for p in show_files: z.write(p, os.path.basename(p))
+                        z.writestr("story.txt", txt)
+                    
+                    dl_cols[0].download_button("📦 オリジナル保存", buf.getvalue(), 
+                                             f"orig_{i+1}.zip", "application/zip", key=f"d1_{i}_{uid}")
+                    
+                    # SNS用
+                    buf2 = io.BytesIO()
+                    with zipfile.ZipFile(buf2, "w") as z:
+                        for p in show_files:
+                            img = Image.open(p)
+                            img.thumbnail((2048, 2048))
+                            ib = io.BytesIO()
+                            img.convert('RGB').save(ib, 'JPEG', quality=90)
+                            z.writestr(os.path.basename(p), ib.getvalue())
+                        z.writestr("story.txt", txt)
 
-                        # 4枚に切り詰め（念のため）
-                        target_paths = target_paths[:4]
-
-                        # --- X風 2x2 グリッド ---
-                        # 4枚揃っている場合のみ綺麗に表示
-                        if len(target_paths) == 4:
-                            st.markdown("#### 📱 プレビュー (2x2)")
-                            b64_imgs = [img_to_base64(p) for p in target_paths]
-                            
-                            html_grid = f"""
-                            <div class="twitter-grid">
-                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[0]}"></div>
-                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[1]}"></div>
-                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[2]}"></div>
-                                <div class="grid-item"><img src="data:image/jpeg;base64,{b64_imgs[3]}"></div>
-                            </div>
-                            """
-                            st.markdown(html_grid, unsafe_allow_html=True)
-                        else:
-                            st.warning(f"画像が不足しています（{len(target_paths)}枚）。アップロード枚数を確認してください。")
-                        
-                        st.divider()
-
-                        # --- 全体表示 ---
-                        st.markdown("#### 🖼️ 全体表示")
-                        cols = st.columns(4)
-                        for idx, fpath in enumerate(target_paths):
-                            img_prev = Image.open(fpath)
-                            cols[idx].image(img_prev, use_container_width=True)
-
-                        # --- ダウンロード ---
-                        st.divider()
-                        st.markdown("#### 📥 ダウンロード")
-                        col_dl1, col_dl2 = st.columns(2)
-                        text_content = f"テーマ: {pat.get('theme')}\n\nストーリー:\n{pat.get('story')}\n\n理由:\n{pat.get('reason')}"
-
-                        if target_paths:
-                            # 1. オリジナル
-                            buf_orig = io.BytesIO()
-                            with zipfile.ZipFile(buf_orig, "w") as z:
-                                for fpath in target_paths:
-                                    z.write(fpath, os.path.basename(fpath))
-                                z.writestr("story.txt", text_content)
-                            
-                            col_dl1.download_button(
-                                f"📦 オリジナル画質\n(元サイズ)",
-                                data=buf_orig.getvalue(),
-                                file_name=f"orig_{i+1}.zip",
-                                mime="application/zip",
-                                key=f"dl_orig_{i}_{unique_id}"
-                            )
-
-                            # 2. SNS用
-                            buf_sns = io.BytesIO()
-                            with zipfile.ZipFile(buf_sns, "w") as z:
-                                for fpath in target_paths:
-                                    img = Image.open(fpath)
-                                    img.thumbnail((2048, 2048))
-                                    img_byte_arr = io.BytesIO()
-                                    if img.mode != "RGB": img = img.convert("RGB")
-                                    img.save(img_byte_arr, format='JPEG', quality=90)
-                                    z.writestr(os.path.basename(fpath), img_byte_arr.getvalue())
-                                z.writestr("story.txt", text_content)
-
-                            col_dl2.download_button(
-                                f"📱 SNS用サイズ\n(軽量版)",
-                                data=buf_sns.getvalue(),
-                                file_name=f"sns_{i+1}.zip",
-                                mime="application/zip",
-                                type="primary",
-                                key=f"dl_sns_{i}_{unique_id}"
-                            )
-else:
-    st.info("👆 上のボックスに写真をドラッグ＆ドロップしてください")
+                    dl_cols[1].download_button("📱 SNS用保存", buf2.getvalue(), 
+                                             f"sns_{i+1}.zip", "application/zip", type="primary", key=f"d2_{i}_{uid}")
